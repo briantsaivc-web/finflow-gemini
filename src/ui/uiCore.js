@@ -903,6 +903,35 @@ ui.miniSpark = function(hist, up){
     "' fill='none' stroke='"+(up?"#35C4A8":"#F0803C")+"' stroke-width='1.5'/></svg>";
 };
 
+
+// 夢想圖片：只有檔案成功載入才顯示；尚未完成授權素材時維持漸層備援。
+ui.dreamImg = function(item){
+  if(!item || !item.imageFile) return null;
+  var im=el("img"); im.alt=item.title||"夢想里程碑"; im.loading="lazy";
+  im.onerror=function(){ im.remove(); };
+  im.src=item.imageFile;
+  return im;
+};
+
+ui.showDreamJourney = function(p){
+  var S=ui.S, dream=ns.content.byId[p.dreamCardId];
+  var ov=el("div","overlay"), box=el("div","sheetbox"); box.style.maxWidth="820px";
+  box.appendChild(el("h2",null,"你的本局夢想旅程"));
+  box.appendChild(el("div","sub",(dream?dream.name:"夢想")+"｜從 20 個候選里程碑抽出的 5 個，本局不會中途更換"));
+  var gallery=el("div","dreamGallery");
+  for(var i=1;i<=5;i++){
+    var item=E.dreamMilestoneData(S,p,i), tile=el("div","dreamTile"+(i<=p.dreamProgress?" done":(i===p.dreamProgress+1?" now":"")));
+    var pic=el("div","pic"), im=ui.dreamImg(item); if(im) pic.appendChild(im);
+    tile.appendChild(pic);
+    tile.appendChild(el("div","cap",i+". "+(item?item.title:"尚未抽取")));
+    gallery.appendChild(tile);
+  }
+  box.appendChild(gallery);
+  box.appendChild(el("div","edu","綠框＝已完成；金框＝下一個目標。圖片載入失敗時會顯示安全的漸層底圖。"));
+  var opts=el("div","opts"); opts.appendChild(optBtn(T("act.close"),null,function(){ov.remove();}));
+  box.appendChild(opts); ov.appendChild(box); $("overlays").appendChild(ov);
+};
+
 ui.renderSheet = function(){
   var S=ui.S;
   var p=(ui.viewPlayerId!==null && ui.viewPlayerId!==undefined && S.players[ui.viewPlayerId]) || S.players[ui.myId()];
@@ -952,8 +981,19 @@ ui.renderSheet = function(){
   }
   head.appendChild(crLine);
   var dream=ns.content.byId[p.dreamCardId];
-  if(dream){ var dm=el("div",null,"夢想："+dream.name+"　"+p.dreamProgress+"／"+S.config.dreamCost+" 點");
-    dm.style.cssText="color:var(--tx3);font-size:13px;margin-top:3px"; head.appendChild(dm); }
+  if(dream){
+    var nextNo=Math.min(S.config.dreamCost,p.dreamProgress+1);
+    var nextDream=E.dreamMilestoneData(S,p,nextNo);
+    var ds=el("div","dreamStrip"); ds.title="點擊查看本局抽出的五個夢想里程碑";
+    ds.onclick=function(){ ui.showDreamJourney(p); };
+    var hero=el("div","dreamHero"), dim=ui.dreamImg(nextDream); if(dim) hero.appendChild(dim);
+    hero.appendChild(el("div","dreamHeroText",dream.name+"｜"+(p.dreamProgress>=S.config.dreamCost?"夢想完成":("下一站："+(nextDream?nextDream.title:"準備出發")))));
+    ds.appendChild(hero);
+    var meta=el("div","dreamMeta"), dots=el("div","dreamDots");
+    for(var di=1;di<=S.config.dreamCost;di++) dots.appendChild(el("span","dreamDot"+(di<=p.dreamProgress?" done":(di===p.dreamProgress+1?" now":""))));
+    meta.appendChild(el("span",null,"夢想進度 "+p.dreamProgress+"／"+S.config.dreamCost)); meta.appendChild(dots);
+    ds.appendChild(meta); head.appendChild(ds);
+  }
   var wb=el("div");
   wb.style.cssText="font-size:13px;margin-top:3px";
   var wbs=el("span","wbClick","幸福感 ♥ "+ui.wellbeing(p)); wbs.style.color="#E8709B";
@@ -2383,6 +2423,13 @@ ui.decisionCard = function(S,p,d){
     var need=S.config.dreamCost, have=p.dreamProgress;
     card.appendChild(el("h3",null,T("outer.buy")));
     card.appendChild(el("div","flavor","用自由圈的現金流，把「"+(dream?dream.name:"夢想")+"」往前推一步。目前進度 "+have+"／"+need+"（每回合限買 1 點，越後面越貴）。"));
+    var target=E.dreamMilestoneData(S,p,Math.min(need,have+1));
+    if(target){
+      var pvDream=el("div","dreamStrip"), heroDream=el("div","dreamHero");
+      var targetImg=ui.dreamImg(target); if(targetImg) heroDream.appendChild(targetImg);
+      heroDream.appendChild(el("div","dreamHeroText","第 "+(have+1)+" 個里程碑｜"+target.title));
+      pvDream.appendChild(heroDream); card.appendChild(pvDream);
+    }
     var o7=el("div","opts");
     o7.appendChild(optBtn("買下一段（"+M(d.price)+"）","夢想進度 +1"+(have+1>=need?"　🎉 這一段就圓夢了":""),function(){
       ui.spendGuard(util.r2(p.cash-d.price), function(){ decide("buy"); }); }, true));

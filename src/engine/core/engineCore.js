@@ -214,7 +214,9 @@ E.makePlayer = function(S, idx, pd){
     // S11：定期定額與股息再投入（只有真人會設定；carry 是「還沒湊滿一張的預算」，不是真的現金）
     dcaPlans:[], divReinvest:{},
     baseSalary:0, salaryVolatility:prof.salaryVolatility||0,
-    playerStage:"INNER", dreamCardId:pd.dreamCardId||null, dreamProgress:0, outerPos:0,
+    playerStage:"INNER", dreamCardId:pd.dreamCardId||null,
+    // 夢想候選池有 20 筆；每局固定抽 5 筆。存入玩家狀態，確保存檔、重播與多人同步一致。
+    dreamMilestoneIds:(pd.dreamMilestoneIds||[]).slice(), dreamProgress:0, outerPos:0,
     graduatedAtTurn:null, freefallWarnings:0, dreamBuyCount:0, boughtProgressThisTurn:false, atDreamSite:false,
     virtues:{TEMPER:0,PRUDENCE:0,PARENTING:0,FILIAL:0}, virtueSpendTotal:0, virtueSavedTotal:0,
     professionEventDone:{}, stats:{ bkRight:0, bkWrong:0, passedOpps:0, optionalSeen:0,
@@ -235,6 +237,10 @@ E.makePlayer = function(S, idx, pd){
     // 重放種子：開局職業。轉職會改寫 professionId，存檔若存當下值，重放會從第一輪就歪掉。
     initialProfessionId: prof.id,
     history:[] };
+
+  if(!p.dreamMilestoneIds.length && p.dreamCardId){
+    p.dreamMilestoneIds=E.pickDreamMilestones(S,p.dreamCardId,idx,5).map(function(x){return x.id;});
+  }
 
   var cm = S.config.startingCashMult, sm = S.config.salaryMult, em = S.config.expenseMult;
   var salary = util.r2(prof.salary*sm), expenses = util.r2(prof.baseExpenses*em);
@@ -1048,4 +1054,35 @@ E.syncPhase = function(S){
   if(S.bookkeeping && S.bookkeeping.tasks.some(function(t){return !t.done;})){ S.phase="BOOKKEEPING"; return; }
   S.phase = S.turnResolved ? "READY_END" : "ROLL";
 };
+
+// 夢想候選池：使用獨立的本地亂數，不消耗遊戲 rngState。
+// 因此同一 seed／座位／夢想必定抽到同一組，且不會改變股市或事件牌順序。
+E.pickDreamMilestones = function(S,dreamCardId,playerIdx,count){
+  var dr=ns.content.byId[dreamCardId], pool=(dr&&dr.milestonePool)||[];
+  if(!pool.length && dr && dr.milestones){
+    pool=dr.milestones.map(function(title,i){return {id:dreamCardId+"_LEGACY_"+(i+1),title:title};});
+  }
+  var a=pool.slice(), h=((S.seed>>>0)^(((playerIdx||0)+1)*2654435761))>>>0;
+  for(var c=0;c<(dreamCardId||"").length;c++) h=(Math.imul(h^dreamCardId.charCodeAt(c),16777619))>>>0;
+  function next(){ h^=h<<13; h^=h>>>17; h^=h<<5; return (h>>>0)/4294967296; }
+  for(var i=a.length-1;i>0;i--){ var j=Math.floor(next()*(i+1)), t=a[i]; a[i]=a[j]; a[j]=t; }
+  return a.slice(0,Math.min(count||5,a.length));
+};
+
+E.dreamMilestoneData = function(S,p,n){
+  var dr=ns.content.byId[p.dreamCardId];
+  if(!dr) return null;
+  var pool=dr.milestonePool||[], byId={};
+  pool.forEach(function(x){byId[x.id]=x;});
+  var chosen=(p.dreamMilestoneIds||[]).map(function(id){return byId[id];}).filter(Boolean);
+  if(!chosen.length) chosen=E.pickDreamMilestones(S,p.dreamCardId,p.id,5);
+  var i=Math.max(1,Math.min(chosen.length,n))-1;
+  return chosen[i]||null;
+};
+
+E.dreamMilestone = function(S,p,n){
+  var item=E.dreamMilestoneData(S,p,n);
+  return item ? item.title : "";
+};
+
 return ns; })();

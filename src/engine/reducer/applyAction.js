@@ -2904,12 +2904,10 @@ E.summarizeClaims = function(list, playerId){
   return out;
 };
 
-// V11：夢想的第 n 點對應到一個具體成就（爬玉山、帛琉潛水⋯⋯）
+// V11：夢想的第 n 點對應到一個具體成就（由 dreamMilestoneData 派生）
 E.dreamMilestone = function(S,p,n){
-  var dr=ns.content.byId[p.dreamCardId];
-  if(!dr || !dr.milestones || !dr.milestones.length) return "";
-  var i=Math.max(1,Math.min(dr.milestones.length,n))-1;
-  return dr.milestones[i]||"";
+  var item=E.dreamMilestoneData(S,p,n);
+  return item ? item.title : "";
 };
 
 /* v0.2 §1：購點（每回合限 1 點、價格 base×n、限現金） */

@@ -644,7 +644,8 @@ ns.seedPlayers = function(S){
   return S.players.map(function(p){
     return { name:p.name, isNPC:p.isNPC, personality:p.npcPersonality,
              professionId: p.initialProfessionId || p.professionId,
-             dreamCardId: p.dreamCardId };
+             dreamCardId: p.dreamCardId,
+             dreamMilestoneIds:(p.dreamMilestoneIds||[]).slice() };
   });
 };
 
@@ -3449,31 +3450,30 @@ ns.selftest = {
       return "賣一筆就夠不會全賣；淨值為負仍有以所得為基準的紓困；P2P 為最後手段；真的無路才出局；NPC 同規則";
     });
 
-    t("T-27 夢想里程碑敘事", function(){
+    t("T-27 夢想里程碑隨機池", function(){
       var S=mkGame(9905,["M1","M2","M4"]), p=S.players[0];
-      var dr=ns.content.byId[p.dreamCardId];
-      assert(dr && dr.milestones && dr.milestones.length>=S.config.dreamCost,
-        "每個夢想應有至少 "+S.config.dreamCost+" 個具體里程碑");
       ns.content.dreams.forEach(function(d){
-        assert(d.milestones && d.milestones.length>=5, d.name+" 缺少里程碑");
-        d.milestones.forEach(function(m){ assert(m && m.length>3, d.name+" 有空的里程碑"); });
+        assert(d.milestonePool && d.milestonePool.length===20,d.name+" 應有 20 個候選里程碑");
+        var ids=d.milestonePool.map(function(m){return m.id;});
+        assert((new Set(ids)).size===20,d.name+" 的里程碑 ID 必須唯一");
+        d.milestonePool.forEach(function(m){
+          assert(m.title && m.title.length>3,d.name+" 有空白標題");
+          assert(m.imageFile && m.imageType,d.name+" 缺少圖片欄位");
+        });
       });
-      // 第 n 點要對應第 n 個里程碑
+      assert(p.dreamMilestoneIds.length===5,"每位玩家應抽出 5 個里程碑");
+      assert((new Set(p.dreamMilestoneIds)).size===5,"抽出的 5 個里程碑不得重複");
+      var S2=mkGame(9905,["M1","M2","M4"]), p2=S2.players[0];
+      assert(JSON.stringify(p.dreamMilestoneIds)===JSON.stringify(p2.dreamMilestoneIds),"同 seed 應抽到同一組");
+      var seeds=ns.seedPlayers(S), S3=E.newGame({seed:S.seed,config:util.clone(S.config),modules:S.enabledModules,players:seeds});
+      assert(JSON.stringify(p.dreamMilestoneIds)===JSON.stringify(S3.players[0].dreamMilestoneIds),"存檔重建應保留抽選結果");
       E.enterOuterCircle(S,p);
-      for(var i=1;i<=S.config.dreamCost;i++){
-        assert(E.dreamMilestone(S,p,i)===dr.milestones[i-1],"第 "+i+" 點應對應第 "+i+" 個里程碑");
+      for(var i=1;i<=5;i++){
+        var item=E.dreamMilestoneData(S,p,i);
+        assert(item && item.id===p.dreamMilestoneIds[i-1],"第 "+i+" 點應對應抽選結果");
+        assert(E.dreamMilestone(S,p,i)===item.title,"文字應來自同一筆資料");
       }
-      // 事件要帶出里程碑文字
-      S.decisionQueue=[]; S.pendingDecision=null;
-      var d0=p.dreamProgress;
-      ns.ledger.post(S,p,"補現金",[{account:"CASH",delta:99999,label:"x"}],{eduTags:["setup"]});
-      p.boughtProgressThisTurn=false;
-      E._events=[];
-      E.buyDreamProgress(S,p);
-      var ev=E._events.filter(function(e){return e.type==="DREAM_PROGRESS";})[0];
-      assert(ev && ev.milestone===dr.milestones[d0], "DREAM_PROGRESS 應帶出第 "+(d0+1)+" 個里程碑，實得 "+(ev&&ev.milestone));
-      assert(ev.dreamName===dr.name,"事件應帶出夢想名稱");
-      return "八個夢想各有 ≥5 個具體里程碑；第 n 點對應第 n 個；事件帶出里程碑與夢想名";
+      return "八張夢想卡各 20 筆；每局抽 5 筆且不重複；同 seed、存檔與重播一致";
     });
 
     t("T-28 理賠明細（原價／折抵／實付／省下）", function(){

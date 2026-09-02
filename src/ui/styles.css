@@ -529,3 +529,23 @@ svg text{user-select:none}
 /* S14b：接近回合上限時的倒數提示 */
 #turnBadge.endingSoon,#turnLabel.endingSoon{ color:#F2C14E; }
 #turnLabel.endingSoon{ background:rgba(242,193,78,.14); border-radius:5px; padding:1px 6px; }
+
+/* 夢想里程碑視覺化與圖片展示 */
+.dreamStrip{margin-top:7px;border:1px solid var(--line2);border-radius:10px;overflow:hidden;
+  background:linear-gradient(135deg,rgba(62,125,214,.18),rgba(180,95,208,.14),rgba(242,193,78,.10));cursor:pointer}
+.dreamHero{height:92px;position:relative;background:linear-gradient(135deg,#233653,#34264a 55%,#614d26);
+  display:flex;align-items:flex-end;overflow:hidden}
+.dreamHero img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block}
+.dreamHero:after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,transparent 25%,rgba(8,13,21,.88))}
+.dreamHeroText{position:relative;z-index:1;padding:9px 10px;color:#fff;font-size:13px;font-weight:750;
+  line-height:1.35;text-shadow:0 1px 4px rgba(0,0,0,.8)}
+.dreamMeta{padding:7px 9px;display:flex;align-items:center;justify-content:space-between;gap:8px;
+  color:var(--tx3);font-size:11.5px}
+.dreamDots{display:flex;gap:4px}.dreamDot{width:18px;height:4px;border-radius:3px;background:var(--line2)}
+.dreamDot.done{background:var(--pos)}.dreamDot.now{background:var(--gold)}
+.dreamGallery{display:grid;grid-template-columns:repeat(5,1fr);gap:7px;margin-top:10px}
+.dreamTile{border:1px solid var(--line);border-radius:9px;overflow:hidden;background:var(--panel2);min-width:0}
+.dreamTile .pic{height:86px;background:linear-gradient(135deg,#253a58,#3e2c50 58%,#69562e);overflow:hidden}
+.dreamTile .pic img{width:100%;height:100%;object-fit:cover;display:block}
+.dreamTile .cap{font-size:11.5px;line-height:1.35;padding:7px;min-height:48px;color:var(--tx2)}
+.dreamTile.done{border-color:rgba(53,196,168,.65)}.dreamTile.now{border-color:var(--gold);box-shadow:0 0 0 1px rgba(242,193,78,.3)}
