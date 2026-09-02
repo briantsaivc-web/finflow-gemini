@@ -87,6 +87,10 @@ var ledger = ns.ledger = {
 
 /* ----------------------------- ns.engine --------------------------------- */
 var E = ns.engine = {};
+E.addJoy = function(p, delta){
+  if(!p || !p.stats) return;
+  p.stats.skillJoy = Math.max(0, (p.stats.skillJoy || 0) + delta);
+};
 E.VERSION = 1;
 ns.BUILD = { ver:"v2.25.1-S20b", date:"2026-08-30" };   // 顯示於系統訊息與開局畫面
 E._events = [];
@@ -695,6 +699,30 @@ E.applyEffects = function(S, p, effects, label, opts){
           var c = util.r2(ns.content.professionById[t.professionId].perChildExpense*S.config.expenseMult);
           ledger.post(S,t,"養育支出增加",[{account:"EXPENSE",delta:c,label:"養育支出"}],{eduTags:["family"]});
         }); break;
+      case "STOCK_CRASH":
+        (ns.content.stockDefs || []).forEach(function(def){
+          if(!ef.category || def.category === ef.category || def.type === ef.category){
+            if(S.stockPrices[def.symbol] !== undefined){
+              var factor = ef.factor !== undefined ? ef.factor : 0.6;
+              S.stockPrices[def.symbol] = E.clampPrice(S, def, S.stockPrices[def.symbol] * factor);
+            }
+          }
+        });
+        E.revalueStocks(S);
+        break;
+      case "INTEREST_RATE_HIKE":
+        var pts = (ef.points || 1) * 0.01;
+        S.activeGlobalEvents.push({
+          seq: ++S.eventSeq,
+          kind: "PARAM",
+          param: "mortgageSpread",
+          value: util.r2((S.config.mortgageSpread || 0.02) + pts),
+          until: S.turnNumber + (ef.durationTurns || 4),
+          label: ef.label || label || "市場升息緊縮",
+          priority: 1
+        });
+        E.repriceFloating(S);
+        break;
       case "STOCK_PRICE_SET":
         if(S.stockPrices[ef.symbol]!==undefined){
           var def = ns.content.stockBySymbol[ef.symbol];

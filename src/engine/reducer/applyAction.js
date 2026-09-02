@@ -1587,6 +1587,11 @@ E.cardUsable = function(S,p,c){
   if(c.kind==="STARTUP" && S.enabledModules.indexOf("M3")<0) return false;
   // S7b：已下市的股票不會再有人賣給你
   if(c.kind==="STOCK" && S.delisted && S.delisted[(c.payload||{}).symbol]) return false;
+  if(c.requiresAnySkill && Array.isArray(c.requiresAnySkill)){
+    var hasAny = c.requiresAnySkill.some(function(sk){ return E.hasSkill(p, sk); });
+    if(!hasAny) return false;
+  }
+  if(c.id === "OPP_INDEPENDENT_DIRECTOR" && p.directorship) return false;
   return true;
 };
 
@@ -1594,6 +1599,13 @@ E.cardUsable = function(S,p,c){
 E.presentCard = function(S,p,card){
   E.ev("CARD_DRAWN",{card:card.id});
   switch(card.kind){
+    case "SPECIAL":
+      if(card.payload && card.payload.decisionKind === "APPOINT_DIRECTOR"){
+        E.pushDecision(S, p, { kind: "APPOINT_DIRECTOR", cardId: card.id, companyType: "B" });
+      } else {
+        E.pushDecision(S, p, { kind: "ACK", cardId: card.id });
+      }
+      break;
     case "REALESTATE": case "STOCK": case "BUSINESS": case "STARTUP":
       E.pushDecision(S,p,{ kind:"BUY", cardId:card.id }); break;
     case "LIFESTYLE":
@@ -1743,9 +1755,9 @@ E.resolveDecision = function(S,p,d,optionId,params){
       if (optionId === "appoint") {
         var comp = (params && params.company) || d.companyType || "B";
         var compDefs = {
-          A: { title: "大型績優權值股", income: 8000, hasInsurance: true, crashTurn: S.turnNumber + 999, fineAmount: 40000 },
-          B: { title: "成長型科技新創板", income: 15000, hasInsurance: true, crashTurn: S.turnNumber + util.randInt(S, 3, 5), fineAmount: 120000 },
-          C: { title: "爭議家族小型股", income: 25000, hasInsurance: false, crashTurn: S.turnNumber + util.randInt(S, 2, 4), fineAmount: 200000 }
+          A: { title: "大型績優權值股", income: 8, hasInsurance: true, crashTurn: S.turnNumber + 999, fineAmount: 40 },
+          B: { title: "成長型科技新創板", income: 15, hasInsurance: true, crashTurn: S.turnNumber + util.randInt(S, 3, 5), fineAmount: 120 },
+          C: { title: "爭議家族小型股", income: 25, hasInsurance: false, crashTurn: S.turnNumber + util.randInt(S, 2, 4), fineAmount: 200 }
         };
         var sel = compDefs[comp] || compDefs.B;
         p.directorship = {
@@ -2117,6 +2129,17 @@ E.buyAsset = function(S,p,card,optionId,params){
       baseMonthlyIncome:util.r2(profit/E.bizMult(S,S.macro.stage)),   // C：景氣係數還原後的基準
       ownCash:downB,                       // S14a：自備現金（純紀錄）
       volatileProfit:!!pl.volatileProfit, linkedLiabilityId:null, flags:{} });
+    if(pl.isScam){
+      p.scamInvestments = p.scamInvestments || [];
+      p.scamInvestments.push({
+        instanceId: id,
+        cardId: card.id,
+        title: name,
+        crashTurn: S.turnNumber + (pl.scamDelayTurns || 3),
+        monthlyDividend: profit,
+        loss: pl.scamLoss || pl.price || 100
+      });
+    }
     var postB=[{account:"CASH",delta:-downB,label:loanB>0?"自備價金":"買入價金"},
       {account:"ASSET",delta:pl.price,refId:id,label:name},
       {account:"INCOME_PASSIVE",delta:profit,refId:id,label:name+" 月分紅"}];
@@ -2532,9 +2555,11 @@ E.npcAcceptReferral = function(S, tgt, card, fee){
 // 原本只算 payload.cost，導致產險顯示「免費」，而且 mallAffordable 也跟著繞過檢查。
 E.mallCost = function(S, it, p){
   var pl=(it&&it.payload)||{};
-  var base = (pl.costSalaryMult && p && p.derived)
-    ? util.r2((p.derived.salaryIncome || 65) * pl.costSalaryMult)
-    : (pl.cost || 0);
+  var profSalary = (ns.content.professionById && ns.content.professionById[p.professionId]) ? ns.content.professionById[p.professionId].salary : 40;
+    var effectiveSal = (p.derived && p.derived.salaryIncome > 0) ? p.derived.salaryIncome : profSalary;
+    var base = (pl.costSalaryMult && p && p.derived)
+      ? util.r2(effectiveSal * pl.costSalaryMult)
+      : (pl.cost || 0);
   return util.r2(base + (pl.annualPremium||0));
 };
 /* ===================== S7b：木作與居家修繕 =====================
@@ -3532,7 +3557,7 @@ E.tickDirectorship = function(S, p){
       E.ev("DIRECTOR_CRASH_AVOIDED", { playerId: p.id, company: d.title });
       p.directorship = null;
     } else {
-      var fine = d.fineAmount || 150000;
+      var fine = d.fineAmount || 120;
       var actualFine = d.hasInsurance ? util.r2(fine * 0.2) : fine;
       ledger.post(S, p, "獨立董事連帶賠償：" + d.title + (d.hasInsurance ? "（D&O 責任險承擔 80%）" : "（無責任險，全額自負）"),
         [{ account: "CASH", delta: -actualFine, label: "弊案連帶民事賠償" }], { eduTags: ["directorship", "liability"] });
@@ -3548,7 +3573,7 @@ E.tickDirectorship = function(S, p){
   // 4) 任期滿順利卸任
   if(!d.resigned && d.termTurnsLeft <= 0){
     if(E.addJoy) E.addJoy(p, 2);
-    p.virtue = (p.virtue || 0) + 1;
+    if(p.virtues) p.virtues.JUSTICE = Math.min(S.config.virtueMaxLevel || 5, (p.virtues.JUSTICE || 0) + 1);
     ledger.post(S, p, "獨立董事任期圓滿卸任",
       [{ account: "CASH", delta: 0, label: "聲譽積累" }], { eduTags: ["directorship"] });
     E.ev("DIRECTOR_TERM_COMPLETE", { playerId: p.id, company: d.title });
@@ -3566,8 +3591,17 @@ E.tickScamInvestments = function(S, p){
       }
       return true;
     }
+    var assetIdx = (p.assets || []).findIndex(function(a){ return a.instanceId === inv.instanceId || a.cardId === inv.cardId; });
+    if(assetIdx >= 0){
+      var badAsset = p.assets[assetIdx];
+      ledger.post(S, p, "吸金資產價值歸零：" + badAsset.name,
+        [{ account: "ASSET", delta: -badAsset.marketValue, refId: badAsset.instanceId, label: "本金血本無歸" },
+         { account: "INCOME_PASSIVE", delta: -badAsset.monthlyIncome, refId: badAsset.instanceId, label: "非法分紅終止" }],
+        { eduTags: ["scam-crash"] });
+      p.assets.splice(assetIdx, 1);
+    }
     ledger.post(S, p, "專案資金鏈斷裂爆雷：" + inv.title + "（負責人潛逃）",
-      [{ account: "CASH", delta: -Math.min(p.cash, 10000), label: "追討訴訟費" }], { eduTags: ["scam-crash"] });
+      [{ account: "CASH", delta: -Math.min(p.cash, 10), label: "追討訴訟費" }], { eduTags: ["scam-crash"] });
     if(E.addJoy) E.addJoy(p, -3);
     E.ev("SCAM_INVESTMENT_CRASH", { playerId: p.id, title: inv.title });
     return false;

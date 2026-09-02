@@ -2504,19 +2504,28 @@ ui.showSkillMenu = function(p){
     pool.forEach(function(sc){
       var price=E.skillPrice(S,sc,false,p), afford=p.cash>=price;
       var isRf=E.skillIsRefresh(p,sc);
+      var prereqMet = !sc.requiresSkill || (p.skills && p.skills[sc.requiresSkill] && !p.skills[sc.requiresSkill].decayed);
+      var prereqCard = sc.requiresSkill ? (ns.content.byId[sc.requiresSkill] || {}) : null;
+      var prereqTitle = prereqCard ? prereqCard.title : sc.requiresSkill;
       var b=el("button","opt");
       b.style.cssText="text-align:left;padding:9px 11px";
       var t=el("div"); t.style.cssText="display:flex;justify-content:space-between;gap:8px";
       t.appendChild(el("b",null,sc.title));
-      t.appendChild(el("span","num"+(afford?"":" neg"),
+      t.appendChild(el("span","num"+(afford&&prereqMet?"":" neg"),
         M(price)+"・"+(E.skillTurns(S,p,sc)+extraT)+" 輪"+(isRf?"（更新）":"")));
       b.appendChild(t);
+      if(prereqTitle){
+        var pr=el("div","fl"); pr.style.cssText="font-size:12px;color:"+(prereqMet?"var(--pos)":"var(--neg)")+";margin-top:2px";
+        pr.textContent=(prereqMet?"✓ 已具備前置：":"🔒 需前置技能：")+prereqTitle;
+        b.appendChild(pr);
+      }
       if(sc.hint){ var h=el("div","fl"); h.style.cssText="font-size:12px;color:var(--tx2);margin-top:2px";
         h.textContent=sc.hint; b.appendChild(h); }
       if(sc.recurringMonthly){ var rr=el("div","fl"); rr.style.cssText="font-size:12px;color:var(--neg)";
         rr.textContent="學習期間每月 −"+M(sc.recurringMonthly); b.appendChild(rr); }
-      b.disabled=!afford;
+      b.disabled = !afford || !prereqMet;
       if(!afford) b.title="現金不足";
+      else if(!prereqMet) b.title="需先掌握前置技能：" + prereqTitle;
       b.onclick=function(){ ov.remove(); ui.dispatch({type:"START_SKILL",playerId:ui.myId(),payload:{skillId:sc.id}}); };
       grid.appendChild(b);
     });

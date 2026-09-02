@@ -741,19 +741,7 @@ npc._rawNextAction = function(S){
 };
 
 npc.nextAction = function(S){
-  var act = npc._rawNextAction(S);
-  if(!act) return null;
-  try {
-    var chk = E.apply(S, act, { mutate: false });
-    if(chk.rejected) {
-      if(S.phase==="READY_END") return { type:"END_TURN", playerId:act.playerId, payload:null };
-      return null;
-    }
-  } catch(e) {
-    if(S.phase==="READY_END") return { type:"END_TURN", playerId:act.playerId, payload:null };
-    return null;
-  }
-  return act;
+  return npc._rawNextAction(S);
 };
 
 // V11：幸福感是獲勝條件之一 —— NPC 在夢想接近完成、但幸福感不足時，

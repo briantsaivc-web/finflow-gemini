@@ -2617,12 +2617,18 @@
           "options": [
             {
               "label": "⚠️ 冒險走捷徑赴約",
-              "sub": "現拿 10 萬，但埋下洗錢人頭帳戶定時炸彈",
+              "sub": "現拿 5 萬週轉，但人頭帳戶遭凍結，後續面臨高額訴訟費",
               "cost": 0,
               "effects": [
                 {
                   "op": "CASH_DELTA",
-                  "amount": 100
+                  "amount": 50
+                },
+                {
+                  "op": "ADD_RECURRING_EXPENSE",
+                  "amount": 15,
+                  "durationTurns": 6,
+                  "label": "人頭帳戶凍結訴訟與律師費"
                 },
                 {
                   "op": "GRANT_VIRTUE",
@@ -3643,6 +3649,7 @@
     "term.DILUTION.3": "股權稀釋",
     "term.MARGIN_CALL.1": "借錢買的股票虧太多被強制賣出",
     "term.MARGIN_CALL.2": "斷頭",
-    "term.MARGIN_CALL.3": "融資追繳"
+    "term.MARGIN_CALL.3": "融資追繳",
+    "toast.prerequisiteRequired": "尚未滿足前置技能要求，無法進修！"
   }
 }

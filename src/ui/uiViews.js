@@ -73,7 +73,7 @@ ui.dispatch = function(action){
   try{
     ui.S.players.forEach(function(pl){ delete pl._b; delete pl._btn; pl.assets.forEach(function(a){ delete a._btn; }); }); // 防禦：清除任何誤掛到 state 的 DOM
     var res = E.apply(ui.S, action);
-    if(res.rejected){ ui.toast(T("toast.rejected"),"warn"); return; }
+    if(res.rejected){ var msg = res.reason === "PREREQUISITE_REQUIRED" ? T("toast.prerequisiteRequired") : T("toast.rejected"); ui.toast(msg,"warn"); return; }
     ui.S = res.state;
     ui.handleEvents(res.events);
     ui.render();
@@ -1012,21 +1012,32 @@ ui.showReport = function(){
     players:S.players.map(function(x){ return {name:x.name, profession:x.professionId, nw:x.derived.netWorth,
       passive:x.derived.passiveIncome, free:x.freeAtTurn, dream:x.dreamProgress, bankrupt:x.bankrupt}; })}},
     "finflow-replay.json"); };
-  var replaySameSeed = el("button","opt primary","🔄 相同種子再戰一次");
-  replaySameSeed.title = "使用完全相同的開局與牌序，考驗不同決策能否逆轉結局！";
-  replaySameSeed.onclick = function(){
-    ov.remove(); ui._reported = false;
-    var origSeed = S.seed;
-    var cfg = JSON.parse(JSON.stringify(S.config));
-    var mods = S.enabledModules.slice();
-    $("app").classList.remove("hide");
-    var S_new = E.initGame(origSeed, cfg, mods);
-    ui.S = S_new;
-    ui.render();
-    ui.tick();
-    ui.toast("已使用相同種子開局，驗證不同策略的因果！", "pos");
-  };
-  opts.appendChild(replaySameSeed);
+  if(!ui.mp){
+    var replaySameSeed = el("button","opt primary","🔄 相同種子再戰一次");
+    replaySameSeed.title = "使用完全相同的開局與牌序，考驗不同決策能否逆轉結局！";
+    replaySameSeed.onclick = function(){
+      ov.remove(); ui._reported = false;
+      var origSeed = S.seed;
+      var cfg = JSON.parse(JSON.stringify(S.config));
+      var mods = S.enabledModules.slice();
+      var pl = S.players.map(function(p){
+        return {
+          name: p.name,
+          professionId: p.professionId,
+          isNPC: p.isNPC,
+          npcPersonality: p.npcPersonality
+        };
+      });
+      $("app").classList.remove("hide");
+      var S_new = E.newGame({ seed: origSeed, config: cfg, modules: mods, players: pl });
+      E.beginTurn(S_new);
+      ui.S = S_new;
+      ui.render();
+      ui.tick();
+      ui.toast("已使用相同種子開局，驗證不同策略的因果！", "pos");
+    };
+    opts.appendChild(replaySameSeed);
+  }
 
   var again=el("button","opt","再玩一局");
   again.onclick=function(){ ov.remove(); ui._reported=false; ui.S=null; $("app").classList.add("hide"); ui.showSetup(); };
