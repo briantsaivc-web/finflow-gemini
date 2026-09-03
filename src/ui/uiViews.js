@@ -394,14 +394,18 @@ ui.handleEvents = function(evs){
         if(!e.progress) break;
         var dn=nm(e.playerId), dcost=ui.S.config.dreamCost;
         var ms=e.milestone||"";                       // V11：這一點到底做了什麼事
+        var pObj = ui.S && ui.S.players && ui.S.players[e.playerId];
+        var itemData = pObj ? E.dreamMilestoneData(ui.S, pObj, e.progress) : null;
+        var imgFile = e.imageFile || (itemData ? itemData.imageFile : null);
         ui.announce("✨ "+me(e.playerId)+"「"+(e.dreamName||"圓夢")+"」"+e.progress+"／"+dcost+
           (ms?("："+ms):"")+(e.paid===false?"（聖地免費 +1）":""), e.playerId);
         ui.lastAct[e.playerId]={turn:ui.S.turnNumber, msg:"✨ "+(ms||("圓夢進度 "+e.progress+"／"+dcost))};
-        // 全服公告：標題放具體成就，副標放進度與剩餘
+        // 全服公告大黃色彈出視窗：附帶 16:9 高清插畫，所有玩家同步可見！
         ui.broadcast("✨ "+dn+"："+(ms||("圓夢進度 "+e.progress+" ／ "+dcost)),
           (e.dreamName?("《"+e.dreamName+"》　"):"")+"進度 "+e.progress+" ／ "+dcost+"　"+
-          (e.progress>=dcost?"夢想已集滿！":"還差 "+(dcost-e.progress)+" 點")+
-          (e.paid===false?"　（踩到自己夢想類別的聖地，免費 +1）":"　（投入資金推進）"),"good",6000);
+          (e.progress>=dcost?"🎉 夢想已集滿！":"還差 "+(dcost-e.progress)+" 點")+
+          (e.paid===false?"　（踩到自己夢想類別的聖地，免費 +1）":"　（投入資金推進）"),
+          "good", 8500, { imageFile: imgFile, tag: "DREAM_PROGRESS" });
         break; }
       case "DREAM_PENDING":
         ui.announce("🕯 "+me(e.playerId)+" 夢想已集滿，但幸福感 "+e.wellbeing+"／"+e.need+" 還沒到——人生不只是把清單打勾", e.playerId);

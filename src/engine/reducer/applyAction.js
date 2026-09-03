@@ -1526,8 +1526,11 @@ E.landing = function(S,p,space){
       if(dream && dream.category===space.category){
         p.atDreamSite = true;
         p.dreamProgress++; p.stats.freeProgress++;
+        var mItemFree = E.dreamMilestoneData(S, p, p.dreamProgress);
         E.ev("DREAM_PROGRESS",{playerId:p.id, progress:p.dreamProgress, paid:false,
-          milestone:E.dreamMilestone(S,p,p.dreamProgress), dreamName:(dream?dream.name:"")});
+          milestone: mItemFree ? mItemFree.title : E.dreamMilestone(S,p,p.dreamProgress),
+          imageFile: mItemFree ? mItemFree.imageFile : null,
+          dreamName:(dream?dream.name:"")});
         E.checkDreamWin(S,p);
         if(!S.over && !p.isNPC) E.pushDecision(S,p,{kind:"ACK", site:{category:space.category}});
         // 購點機會改由 doMove 尾端的 offerDreamProgress 統一供應（免費+1 後仍可再購 1）
@@ -2917,8 +2920,10 @@ E.buyDreamProgress = function(S,p){
   p.dreamProgress++; p.dreamBuyCount++; p.stats.paidProgress++;
   p.boughtProgressThisTurn=true;
   ledger.post(S,p,"投入圓夢：買下一段進度",[{account:"CASH",delta:-price,label:"圓夢支出"}],{eduTags:["dream"]});
+  var mItemPaid = E.dreamMilestoneData(S, p, p.dreamProgress);
   E.ev("DREAM_PROGRESS",{playerId:p.id, progress:p.dreamProgress, paid:true,
-    milestone:E.dreamMilestone(S,p,p.dreamProgress),
+    milestone: mItemPaid ? mItemPaid.title : E.dreamMilestone(S,p,p.dreamProgress),
+    imageFile: mItemPaid ? mItemPaid.imageFile : null,
     dreamName:(ns.content.byId[p.dreamCardId]||{}).name||""});
   E.checkDreamWin(S,p);
   return true;

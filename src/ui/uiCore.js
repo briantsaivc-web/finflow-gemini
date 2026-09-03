@@ -860,17 +860,40 @@ ui.showReferPanel = function(cd){
 };
 
 // 九期：全服公告（重大事件）——橫幅由上方滑入，數秒後自動收；可點擊立即關閉
-ui.broadcast = function(title, sub, tone, ms){
+ui.broadcast = function(title, sub, tone, ms, opt){
   var host=$("bcast"); if(!host) return;
-  var bc=el("div","bc"+(tone==="warn"?" warn":""));
-  bc.appendChild(el("div","ttl",title));
-  if(sub) bc.appendChild(el("div","sub",sub));
-  host.innerHTML="";
+  var isWarn = tone==="warn";
+  var hasImg = !!(opt && opt.imageFile);
+  var bc = el("div", "bc" + (isWarn ? " warn" : "") + (hasImg ? " hasImg" : ""));
+  
+  if(hasImg){
+    var imgWrap = el("div", "bcImgWrap");
+    var im = el("img");
+    im.alt = title;
+    im.loading = "eager";
+    im.src = opt.imageFile;
+    im.onerror = function(){ imgWrap.remove(); bc.classList.remove("hasImg"); };
+    imgWrap.appendChild(im);
+    bc.appendChild(imgWrap);
+  }
+  
+  var textWrap = el("div", "bcText");
+  textWrap.appendChild(el("div", "ttl", title));
+  if(sub) textWrap.appendChild(el("div", "sub", sub));
+  bc.appendChild(textWrap);
+  
+  host.innerHTML = "";
   host.appendChild(bc);
-  var kill=function(){ if(bc.parentNode) bc.parentNode.removeChild(bc); };
-  bc.onclick=kill;
+  
+  var kill = function(){
+    if(bc.parentNode){
+      bc.style.animation = "bcOut .24s ease-in forwards";
+      setTimeout(function(){ if(bc.parentNode) bc.parentNode.removeChild(bc); }, 230);
+    }
+  };
+  bc.onclick = kill;
   clearTimeout(ui._bcT);
-  ui._bcT=setTimeout(kill, ms||5200);
+  ui._bcT = setTimeout(kill, ms || (hasImg ? 8500 : 5200));
 };
 
 // 八期：完整系統訊息（最多 40 則）

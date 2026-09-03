@@ -475,16 +475,23 @@ body.autopilot #board{outline:2px dashed rgba(242,193,78,.35);outline-offset:-4p
 /* ---------- 覆蓋層（開局 / 復盤 / 調參 / 自測） ---------- */
 /* 九期：全服公告（重大事件橫幅） */
 #bcast{position:fixed;left:0;right:0;top:0;width:calc(var(--vw)*100);z-index:820;display:flex;justify-content:center;
-  pointer-events:none;padding:10px 12px}
-#bcast .bc{pointer-events:auto;background:linear-gradient(135deg,rgba(242,193,78,.97),rgba(240,160,60,.97));
-  color:#221803;border-radius:14px;padding:11px 20px;max-width:min(760px,calc(var(--vw)*94));
-  box-shadow:0 14px 40px rgba(0,0,0,.55);border:1px solid rgba(255,255,255,.35);
-  animation:bcIn .38s cubic-bezier(.2,1.2,.3,1);text-align:center}
-#bcast .bc .ttl{font-size:17px;font-weight:800;letter-spacing:.04em}
-#bcast .bc .sub{font-size:14px;margin-top:2px;opacity:.85}
+  pointer-events:none;padding:12px 14px}
+#bcast .bc{pointer-events:auto;background:linear-gradient(135deg,rgba(242,193,78,.98),rgba(240,160,60,.98));
+  color:#221803;border-radius:16px;padding:12px 22px;max-width:min(760px,calc(var(--vw)*94));
+  box-shadow:0 14px 45px rgba(0,0,0,.65);border:1px solid rgba(255,255,255,.45);
+  animation:bcIn .38s cubic-bezier(.2,1.2,.3,1);text-align:center;cursor:pointer}
+#bcast .bc.hasImg{max-width:min(560px,calc(var(--vw)*92));padding:12px 14px 14px 14px}
+#bcast .bc .bcImgWrap{width:100%;aspect-ratio:16/9;border-radius:12px;overflow:hidden;
+  box-shadow:0 8px 24px rgba(0,0,0,.45);border:1px solid rgba(255,255,255,.45);
+  background:#1a1612;margin-bottom:10px;position:relative}
+#bcast .bc .bcImgWrap img{width:100%;height:100%;object-fit:cover;display:block}
+#bcast .bc .bcText{display:flex;flex-direction:column;align-items:center}
+#bcast .bc .ttl{font-size:18px;font-weight:800;letter-spacing:.04em;line-height:1.35}
+#bcast .bc .sub{font-size:14px;margin-top:4px;opacity:.92;line-height:1.4}
 #bcast .bc.warn{background:linear-gradient(135deg,rgba(226,84,74,.97),rgba(190,58,50,.97));color:#fff}
 #bcast .bc.warn .sub{opacity:.92}
 @keyframes bcIn{from{transform:translateY(-24px);opacity:0}to{transform:none;opacity:1}}
+@keyframes bcOut{from{transform:none;opacity:1}to{transform:translateY(-20px);opacity:0}}
 .overlay{position:fixed;inset:0;height:calc(var(--vh)*100);width:calc(var(--vw)*100);z-index:700;background:rgba(6,10,16,.82);display:flex;
   align-items:center;justify-content:center;padding:22px;backdrop-filter:blur(3px)}
 .sheetbox{background:var(--panel);border:1px solid var(--line2);border-radius:20px;padding:20px 22px;
@@ -542,7 +549,7 @@ svg text{user-select:none}
 /* 夢想里程碑視覺化與圖片展示 */
 .dreamStrip{margin-top:7px;border:1px solid var(--line2);border-radius:10px;overflow:hidden;
   background:linear-gradient(135deg,rgba(62,125,214,.18),rgba(180,95,208,.14),rgba(242,193,78,.10));cursor:pointer}
-.dreamHero{height:92px;position:relative;background:linear-gradient(135deg,#233653,#34264a 55%,#614d26);
+.dreamHero{width:100%;aspect-ratio:16/9;position:relative;background:linear-gradient(135deg,#233653,#34264a 55%,#614d26);
   display:flex;align-items:flex-end;overflow:hidden}
 .dreamHero img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block}
 .dreamHero:after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,transparent 25%,rgba(8,13,21,.88))}
@@ -554,7 +561,7 @@ svg text{user-select:none}
 .dreamDot.done{background:var(--pos)}.dreamDot.now{background:var(--gold)}
 .dreamGallery{display:grid;grid-template-columns:repeat(5,1fr);gap:7px;margin-top:10px}
 .dreamTile{border:1px solid var(--line);border-radius:9px;overflow:hidden;background:var(--panel2);min-width:0}
-.dreamTile .pic{height:86px;background:linear-gradient(135deg,#253a58,#3e2c50 58%,#69562e);overflow:hidden}
+.dreamTile .pic{width:100%;aspect-ratio:16/9;background:linear-gradient(135deg,#253a58,#3e2c50 58%,#69562e);overflow:hidden}
 .dreamTile .pic img{width:100%;height:100%;object-fit:cover;display:block}
 .dreamTile .cap{font-size:11.5px;line-height:1.35;padding:7px;min-height:48px;color:var(--tx2)}
 .dreamTile.done{border-color:rgba(53,196,168,.65)}.dreamTile.now{border-color:var(--gold);box-shadow:0 0 0 1px rgba(242,193,78,.3)}
@@ -3240,8 +3247,11 @@ E.landing = function(S,p,space){
       if(dream && dream.category===space.category){
         p.atDreamSite = true;
         p.dreamProgress++; p.stats.freeProgress++;
+        var mItemFree = E.dreamMilestoneData(S, p, p.dreamProgress);
         E.ev("DREAM_PROGRESS",{playerId:p.id, progress:p.dreamProgress, paid:false,
-          milestone:E.dreamMilestone(S,p,p.dreamProgress), dreamName:(dream?dream.name:"")});
+          milestone: mItemFree ? mItemFree.title : E.dreamMilestone(S,p,p.dreamProgress),
+          imageFile: mItemFree ? mItemFree.imageFile : null,
+          dreamName:(dream?dream.name:"")});
         E.checkDreamWin(S,p);
         if(!S.over && !p.isNPC) E.pushDecision(S,p,{kind:"ACK", site:{category:space.category}});
         // 購點機會改由 doMove 尾端的 offerDreamProgress 統一供應（免費+1 後仍可再購 1）
@@ -4631,8 +4641,10 @@ E.buyDreamProgress = function(S,p){
   p.dreamProgress++; p.dreamBuyCount++; p.stats.paidProgress++;
   p.boughtProgressThisTurn=true;
   ledger.post(S,p,"投入圓夢：買下一段進度",[{account:"CASH",delta:-price,label:"圓夢支出"}],{eduTags:["dream"]});
+  var mItemPaid = E.dreamMilestoneData(S, p, p.dreamProgress);
   E.ev("DREAM_PROGRESS",{playerId:p.id, progress:p.dreamProgress, paid:true,
-    milestone:E.dreamMilestone(S,p,p.dreamProgress),
+    milestone: mItemPaid ? mItemPaid.title : E.dreamMilestone(S,p,p.dreamProgress),
+    imageFile: mItemPaid ? mItemPaid.imageFile : null,
     dreamName:(ns.content.byId[p.dreamCardId]||{}).name||""});
   E.checkDreamWin(S,p);
   return true;
@@ -7494,17 +7506,40 @@ ui.showReferPanel = function(cd){
 };
 
 // 九期：全服公告（重大事件）——橫幅由上方滑入，數秒後自動收；可點擊立即關閉
-ui.broadcast = function(title, sub, tone, ms){
+ui.broadcast = function(title, sub, tone, ms, opt){
   var host=$("bcast"); if(!host) return;
-  var bc=el("div","bc"+(tone==="warn"?" warn":""));
-  bc.appendChild(el("div","ttl",title));
-  if(sub) bc.appendChild(el("div","sub",sub));
-  host.innerHTML="";
+  var isWarn = tone==="warn";
+  var hasImg = !!(opt && opt.imageFile);
+  var bc = el("div", "bc" + (isWarn ? " warn" : "") + (hasImg ? " hasImg" : ""));
+  
+  if(hasImg){
+    var imgWrap = el("div", "bcImgWrap");
+    var im = el("img");
+    im.alt = title;
+    im.loading = "eager";
+    im.src = opt.imageFile;
+    im.onerror = function(){ imgWrap.remove(); bc.classList.remove("hasImg"); };
+    imgWrap.appendChild(im);
+    bc.appendChild(imgWrap);
+  }
+  
+  var textWrap = el("div", "bcText");
+  textWrap.appendChild(el("div", "ttl", title));
+  if(sub) textWrap.appendChild(el("div", "sub", sub));
+  bc.appendChild(textWrap);
+  
+  host.innerHTML = "";
   host.appendChild(bc);
-  var kill=function(){ if(bc.parentNode) bc.parentNode.removeChild(bc); };
-  bc.onclick=kill;
+  
+  var kill = function(){
+    if(bc.parentNode){
+      bc.style.animation = "bcOut .24s ease-in forwards";
+      setTimeout(function(){ if(bc.parentNode) bc.parentNode.removeChild(bc); }, 230);
+    }
+  };
+  bc.onclick = kill;
   clearTimeout(ui._bcT);
-  ui._bcT=setTimeout(kill, ms||5200);
+  ui._bcT = setTimeout(kill, ms || (hasImg ? 8500 : 5200));
 };
 
 // 八期：完整系統訊息（最多 40 則）
@@ -11264,14 +11299,18 @@ ui.handleEvents = function(evs){
         if(!e.progress) break;
         var dn=nm(e.playerId), dcost=ui.S.config.dreamCost;
         var ms=e.milestone||"";                       // V11：這一點到底做了什麼事
+        var pObj = ui.S && ui.S.players && ui.S.players[e.playerId];
+        var itemData = pObj ? E.dreamMilestoneData(ui.S, pObj, e.progress) : null;
+        var imgFile = e.imageFile || (itemData ? itemData.imageFile : null);
         ui.announce("✨ "+me(e.playerId)+"「"+(e.dreamName||"圓夢")+"」"+e.progress+"／"+dcost+
           (ms?("："+ms):"")+(e.paid===false?"（聖地免費 +1）":""), e.playerId);
         ui.lastAct[e.playerId]={turn:ui.S.turnNumber, msg:"✨ "+(ms||("圓夢進度 "+e.progress+"／"+dcost))};
-        // 全服公告：標題放具體成就，副標放進度與剩餘
+        // 全服公告大黃色彈出視窗：附帶 16:9 高清插畫，所有玩家同步可見！
         ui.broadcast("✨ "+dn+"："+(ms||("圓夢進度 "+e.progress+" ／ "+dcost)),
           (e.dreamName?("《"+e.dreamName+"》　"):"")+"進度 "+e.progress+" ／ "+dcost+"　"+
-          (e.progress>=dcost?"夢想已集滿！":"還差 "+(dcost-e.progress)+" 點")+
-          (e.paid===false?"　（踩到自己夢想類別的聖地，免費 +1）":"　（投入資金推進）"),"good",6000);
+          (e.progress>=dcost?"🎉 夢想已集滿！":"還差 "+(dcost-e.progress)+" 點")+
+          (e.paid===false?"　（踩到自己夢想類別的聖地，免費 +1）":"　（投入資金推進）"),
+          "good", 8500, { imageFile: imgFile, tag: "DREAM_PROGRESS" });
         break; }
       case "DREAM_PENDING":
         ui.announce("🕯 "+me(e.playerId)+" 夢想已集滿，但幸福感 "+e.wellbeing+"／"+e.need+" 還沒到——人生不只是把清單打勾", e.playerId);
