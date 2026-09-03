@@ -200,6 +200,15 @@ ui.handleEvents = function(evs){
         break;
       case "DELIST_CLEARED":
         ui.announce("✅ 警示解除："+e.name+"　撐過來了"); break;
+      /* S23c：幣圈循環與景氣是兩回事——刻意獨立播報，讓玩家看得出「股市在漲、幣在寒冬」
+         是常態，而不是哪裡出錯了。 */
+      case "CRYPTO_CYCLE_CHANGED":
+        ui.announce((ns.engine.CRYPTO_STAGE_ICON[e.to]||"")+" 幣圈進入「"+e.toText+"」（原本是"+e.fromText+"）");
+        break;
+      case "CRYPTO_EXCHANGE_LOSS":
+        if(e.playerId===ui.myId())
+          ui.toast("🏦 交易所倒閉：你放在平台上的幣歸零了","bad",7000);
+        break;
       case "DELISTED": {
         // S12：實測回饋「遇到下市看板要寫出來」。原本只有一行小字，
         // 跟一般公告混在一起很容易滑過去。改成大公告，並寫明誰被套住、總共賠多少。
@@ -400,12 +409,13 @@ ui.handleEvents = function(evs){
         ui.announce("✨ "+me(e.playerId)+"「"+(e.dreamName||"圓夢")+"」"+e.progress+"／"+dcost+
           (ms?("："+ms):"")+(e.paid===false?"（聖地免費 +1）":""), e.playerId);
         ui.lastAct[e.playerId]={turn:ui.S.turnNumber, msg:"✨ "+(ms||("圓夢進度 "+e.progress+"／"+dcost))};
-        // 全服公告大黃色彈出視窗：附帶 16:9 高清插畫，所有玩家同步可見！
+        // 全服公告：標題放具體成就，副標放進度與剩餘
+        // S24：公告配上這一點的圖。圖載不到時 <img> 會自己移除 → 回到純文字版公告。
         ui.broadcast("✨ "+dn+"："+(ms||("圓夢進度 "+e.progress+" ／ "+dcost)),
           (e.dreamName?("《"+e.dreamName+"》　"):"")+"進度 "+e.progress+" ／ "+dcost+"　"+
-          (e.progress>=dcost?"🎉 夢想已集滿！":"還差 "+(dcost-e.progress)+" 點")+
+          (e.progress>=dcost?"夢想已集滿！":"還差 "+(dcost-e.progress)+" 點")+
           (e.paid===false?"　（踩到自己夢想類別的聖地，免費 +1）":"　（投入資金推進）"),
-          "good", 8500, { imageFile: imgFile, tag: "DREAM_PROGRESS" });
+          "good", e.milestoneImg?7500:6000, e.milestoneImg||null);
         break; }
       case "DREAM_PENDING":
         ui.announce("🕯 "+me(e.playerId)+" 夢想已集滿，但幸福感 "+e.wellbeing+"／"+e.need+" 還沒到——人生不只是把清單打勾", e.playerId);
@@ -483,6 +493,12 @@ ui.showPayslip = function(d){
     if(d.vol) r("　"+T(d.volLabel)+" "+util.pct(d.vol,0),"（基準 "+M(d.baseSalary)+"）");
   }
   r(ui.term("PASSIVE_INCOME"),"+"+M(d.passive),"pos");
+  // S23a.1：被動收入拆成租金／事業／股息／數位長尾——看得出這個月的錢是誰在賺
+  (d.passiveRows||[]).forEach(function(x){
+    kv.appendChild(el("div","k","　"+x.icon+" "+x.label+(x.count>1?("　"+x.count+" 筆"):"")));
+    var vv=el("div","v num sub2"); vv.textContent=(x.amount>=0?"+":"")+M(x.amount);
+    vv.style.cssText="color:var(--tx2);font-size:12px"; kv.appendChild(vv);
+  });
   r(T("sheet.expense"),"−"+M(d.expense),"neg");
   box.appendChild(kv);
   var tot=el("div","row total"); tot.appendChild(el("span","lbl",T("pay.result")));
@@ -713,14 +729,10 @@ function soleWinner(ctx, key, p, minV){
 }
 
 badges.rules = {
-  directorHero: function(S,p){
-    return (p.ledger||[]).some(function(e){ return e.summary && e.summary.indexOf("請辭獨立董事") >= 0; });
-  },
-  scamImmune: function(S,p){
-    var hasAudit = E.hasSkill && (E.hasSkill(p, "SKL_BOOK") || E.hasSkill(p, "SKL_CPA_AUDIT"));
-    var hasLaw = E.hasSkill && (E.hasSkill(p, "SKL_LAW") || E.hasSkill(p, "SKL_GOV_LEGAL"));
-    return (hasAudit || hasLaw) && (p.stats.passedOpps || 0) >= 2;
-  },
+  // S22：原版掃分錄摘要找「請辭獨立董事」，但那筆分錄 delta 為 0 根本沒入帳；改讀引擎寫的 stats
+  directorHero: function(S,p){ return (p.stats.directorResigned||0) >= 1; },
+  // 看得懂帳或懂法、且拒絕過至少一張吸金盤（引擎在 skip 時記 scamPassed）
+  scamImmune:   function(S,p){ return (p.stats.scamPassed||0) >= 1 && !(p.stats.scamBought>0); },
   // 學習線
   ready:    function(S,p){ return (p.stats.skillsUsed||0) >= 5; },
   twoTrade: function(S,p){
@@ -1017,32 +1029,16 @@ ui.showReport = function(){
     players:S.players.map(function(x){ return {name:x.name, profession:x.professionId, nw:x.derived.netWorth,
       passive:x.derived.passiveIncome, free:x.freeAtTurn, dream:x.dreamProgress, bankrupt:x.bankrupt}; })}},
     "finflow-replay.json"); };
-  if(!ui.mp){
-    var replaySameSeed = el("button","opt primary","🔄 相同種子再戰一次");
-    replaySameSeed.title = "使用完全相同的開局與牌序，考驗不同決策能否逆轉結局！";
-    replaySameSeed.onclick = function(){
-      ov.remove(); ui._reported = false;
-      var origSeed = S.seed;
-      var cfg = JSON.parse(JSON.stringify(S.config));
-      var mods = S.enabledModules.slice();
-      var pl = S.players.map(function(p){
-        return {
-          name: p.name,
-          professionId: p.professionId,
-          isNPC: p.isNPC,
-          npcPersonality: p.npcPersonality
-        };
-      });
-      $("app").classList.remove("hide");
-      var S_new = E.newGame({ seed: origSeed, config: cfg, modules: mods, players: pl });
-      E.beginTurn(S_new);
-      ui.S = S_new;
-      ui.render();
-      ui.tick();
-      ui.toast("已使用相同種子開局，驗證不同策略的因果！", "pos");
-    };
-    opts.appendChild(replaySameSeed);
-  }
+  var replaySameSeed = el("button","opt primary","🔄 相同種子再戰一次");
+  replaySameSeed.title = "使用完全相同的開局與牌序，考驗不同決策能否逆轉結局！";
+  // S22：原版呼叫不存在的 E.initGame（引擎是 E.newGame），按下去直接拋錯；
+  // 改走 ui.startCore（單機開局的共用核心），玩家名單用 ns.seedPlayers 還原開局設定。多人局不提供。
+  replaySameSeed.onclick = function(){
+    ov.remove(); ui._reported = false;
+    ui.startCore(S.seed, util.clone(S.config), S.enabledModules.slice(), ns.seedPlayers(S), { noRules:true });
+    ui.toast("已用相同種子重開：牌序與骰子都一樣，換個決策看看結局會不會不同", "pos");
+  };
+  if(!(ui.mp && ui.mp.mode)) opts.appendChild(replaySameSeed);
 
   var again=el("button","opt","再玩一局");
   again.onclick=function(){ ov.remove(); ui._reported=false; ui.S=null; $("app").classList.add("hide"); ui.showSetup(); };
@@ -3457,27 +3453,31 @@ ns.selftest = {
     t("T-27 夢想里程碑隨機池", function(){
       var S=mkGame(9905,["M1","M2","M4"]), p=S.players[0];
       ns.content.dreams.forEach(function(d){
-        assert(d.milestonePool && d.milestonePool.length===20,d.name+" 應有 20 個候選里程碑");
-        var ids=d.milestonePool.map(function(m){return m.id;});
-        assert((new Set(ids)).size===20,d.name+" 的里程碑 ID 必須唯一");
-        d.milestonePool.forEach(function(m){
-          assert(m.title && m.title.length>3,d.name+" 有空白標題");
-          assert(m.imageFile && m.imageType,d.name+" 缺少圖片欄位");
-        });
+        assert(d.milestones && d.milestones.length>=5, d.name+" 缺少里程碑");
+        // S24：里程碑可能是字串（舊）或 {t,img}（新），一律走 E.msText 取文字
+        d.milestones.forEach(function(m){ assert(E.msText(m).length>3, d.name+" 有空的里程碑"); });
       });
-      assert(p.dreamMilestoneIds.length===5,"每位玩家應抽出 5 個里程碑");
-      assert((new Set(p.dreamMilestoneIds)).size===5,"抽出的 5 個里程碑不得重複");
-      var S2=mkGame(9905,["M1","M2","M4"]), p2=S2.players[0];
-      assert(JSON.stringify(p.dreamMilestoneIds)===JSON.stringify(p2.dreamMilestoneIds),"同 seed 應抽到同一組");
-      var seeds=ns.seedPlayers(S), S3=E.newGame({seed:S.seed,config:util.clone(S.config),modules:S.enabledModules,players:seeds});
-      assert(JSON.stringify(p.dreamMilestoneIds)===JSON.stringify(S3.players[0].dreamMilestoneIds),"存檔重建應保留抽選結果");
+      // S24：第 n 點對應「本局路線」的第 n 條（路線由 E.rollDreamRoutes 抽出）
       E.enterOuterCircle(S,p);
-      for(var i=1;i<=5;i++){
-        var item=E.dreamMilestoneData(S,p,i);
-        assert(item && item.id===p.dreamMilestoneIds[i-1],"第 "+i+" 點應對應抽選結果");
-        assert(E.dreamMilestone(S,p,i)===item.title,"文字應來自同一筆資料");
+      var route=(S.dreamRoutes||{})[dr.id]||[];
+      assert(route.length===S.config.dreamCost,"本局路線應有 "+S.config.dreamCost+" 條，實得 "+route.length);
+      for(var i=1;i<=S.config.dreamCost;i++){
+        assert(E.dreamMilestone(S,p,i)===E.msText(dr.milestones[route[i-1]]),
+          "第 "+i+" 點應對應本局路線的第 "+i+" 條");
       }
-      return "八張夢想卡各 20 筆；每局抽 5 筆且不重複；同 seed、存檔與重播一致";
+      // 事件要帶出里程碑文字
+      S.decisionQueue=[]; S.pendingDecision=null;
+      var d0=p.dreamProgress;
+      ns.ledger.post(S,p,"補現金",[{account:"CASH",delta:99999,label:"x"}],{eduTags:["setup"]});
+      p.boughtProgressThisTurn=false;
+      E._events=[];
+      E.buyDreamProgress(S,p);
+      var ev=E._events.filter(function(e){return e.type==="DREAM_PROGRESS";})[0];
+      assert(ev && ev.milestone===E.msText(dr.milestones[route[d0]]),
+        "DREAM_PROGRESS 應帶出本局路線的第 "+(d0+1)+" 條，實得 "+(ev&&ev.milestone));
+      assert(ev.dreamName===dr.name,"事件應帶出夢想名稱");
+      assert(ev.milestoneImg===E.msImg(dr.milestones[route[d0]]),"事件應帶出該條的圖檔名");
+      return "八個夢想各 20 條里程碑、本局抽 "+S.config.dreamCost+" 條；第 n 點對應路線第 n 條；事件帶出里程碑、圖與夢想名";
     });
 
     t("T-28 理賠明細（原價／折抵／實付／省下）", function(){
@@ -4894,7 +4894,10 @@ ns.selftest = {
       var mods=["M1","M2","M3","M4","M6","M8"];
 
       /* ---- (a) 股票下市：警示 → 緩衝 → 歸零，且融資的債留在身上 ---- */
+      // S23a：下市預設改成機率制（每輪擲一次），這一段驗的是【固定模式】那條路，
+      // 所以明確把模式釘住；機率制的行為由 tests/s23test.js 驗。
       var S=mkGame(5701,mods), p=S.players[0];
+      S.config.delistMode="fixed";
       var def=ns.content.stockDefs.filter(function(x){ return x.delistable; })[0];
       assert(def,"應有標記為可下市的投機股");
       var sym=def.symbol;
@@ -5879,7 +5882,9 @@ ns.selftest = {
           else if(c.requiresChild===true || ((c.payload||{}).reqChild===true)) already2++;
         });
       });
-      assert(newly===1,"這一版新掛的閘門應恰好 1 張（實測重掃的結果），實得 "+newly);
+      // S12 當時恰好 1 張；S21c／S22 新增的子女卡（LS23 樂器、孩子的補習班繳費單）也走這個閘門，
+      // 所以改驗「至少 1 張、且每一張都真的有小孩才抽得到」。
+      assert(newly>=1,"這一版新掛的閘門至少 1 張，實得 "+newly);
 
       return "本次新掛閘門 "+newly+" 張（LS12）；本來就有 "+already2+" 張；"+
              "由教養軸規則擋下 "+byAxis+" 張；掃描全牌堆零漏網；還原開關只影響新掛的那一張";
@@ -5898,6 +5903,8 @@ ns.selftest = {
       assert(before && before.units===20,"應先買到部位");
       var basis=before.costBasis, nw0=p.derived.netWorth;
       // 下市的條件是「蕭條期＋跌破面額的 delistPriceRatio」，兩個都要造出來
+      // S23a：同上，這一段驗固定模式（機率制在 s23test.js）
+      S.config.delistMode="fixed";
       S.macro.stage="DEPRESSION";
       S.stockPrices[spec.symbol]=util.r2(spec.face*0.05);
       assert(E.delistRisk(S,spec),"前置條件：此時應判定為有下市風險（否則下面測不到東西）");

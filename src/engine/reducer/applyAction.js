@@ -342,6 +342,84 @@ E.apply = function(state, action, opts){
     ev("DIV_REINVEST_SET",{playerId:p.id,symbol:symR,on:!!action.payload.on});
     break; }
 
+  /* S23b：期貨。與股票同一組相位守門（自己的回合才能開平倉），
+     所有前置檢查都在引擎層——介面反灰只是提示，不能當把關。 */
+  case "FUT_OPEN": {
+    if(p.bankrupt) return reject("BANKRUPT");
+    if(S.phase!=="ROLL" && S.phase!=="READY_END") return reject("WRONG_PHASE");
+    if(!E.m9On(S)) return reject("NO_M9");
+    if(!E.advancedUnlocked(S,p)) return reject("ADV_LOCKED");
+    var fs=action.payload.symbol, fdef=E.futDef(fs);
+    if(!fdef) return reject("NO_SYMBOL");
+    if(E.isDelisted(S,fdef.underlying)) return reject("DELISTED");
+    var fside=action.payload.side==="short" ? "short" : "long";
+    var flots=Math.max(1,Math.floor(action.payload.lots||1));
+    var cvOne=E.futContractValue(S,fdef);
+    if(!(cvOne>0)) return reject("NO_PRICE");
+    // 同一標的不能多空同時持有——要換方向先平倉（避免自己跟自己對鎖）
+    var opp=E.futPositions(p).filter(function(x){ return x.symbol===fs && x.side!==fside; })[0];
+    if(opp) return reject("OPPOSITE_POSITION");
+    var maxL=E.futMaxLots(S,p);
+    if(E.futLotsHeld(p,null)+flots > maxL) return reject("FUT_LOT_LIMIT");
+    var needMargin=util.r2(cvOne*flots*E.futMarginPct(S,fdef));
+    var feeO=E.futFee(S,flots);
+    if(p.cash < util.r2(needMargin+feeO)) return reject("NO_CASH");
+    accept();
+    var same=E.futPositions(p).filter(function(x){ return x.symbol===fs && x.side===fside; })[0];
+    var fid = same ? same.instanceId : util.uid(S,"A");
+    if(same){
+      // 加碼：保證金與口數累加，開倉價用加權平均（結算看的是 lastPrice，這裡只是顯示用）
+      var totLots=same.lots+flots;
+      same.entryPrice=util.r2((same.entryPrice*same.lots + E.futPrice(S,fdef)*flots)/totLots);
+      same.lots=totLots;
+      same.marketValue=util.r2(same.marketValue+needMargin);
+      same.costBasis=util.r2((same.costBasis||0)+needMargin);
+    } else {
+      p.assets.push({ instanceId:fid, cardId:null, kind:"FUTURES", name:fdef.name+"（"+(fside==="short"?"空":"多")+"）",
+        symbol:fs, side:fside, lots:flots, units:flots,
+        entryPrice:E.futPrice(S,fdef), lastPrice:E.futPrice(S,fdef),
+        costBasis:needMargin, marketValue:needMargin, monthlyIncome:0,
+        ownCash:needMargin, linkedLiabilityId:null, flags:{futures:true} });
+    }
+    var postF=[{account:"CASH",delta:-needMargin,label:"期貨原始保證金"},
+               {account:"ASSET",delta:needMargin,refId:fid,label:fdef.name+" 保證金"}];
+    if(feeO) postF.push({account:"CASH",delta:-feeO,label:"期貨手續費（每口 "+util.money(E.cfg(S,"futFeePerLot"))+"）"});
+    ledger.post(S,p,(fside==="short"?"放空":"作多")+"期貨："+fdef.name+" "+flots+" 口（合約值 "+util.money(util.r2(cvOne*flots))+"）",
+      postF,{eduTags:["futures","leverage"],
+             detail:{lots:flots, side:fside, contractValue:util.r2(cvOne*flots), margin:needMargin, fee:feeO}});
+    p.stats.futOpened=(p.stats.futOpened||0)+1;
+    ev("FUT_OPENED",{playerId:p.id, symbol:fs, side:fside, lots:flots, margin:needMargin, fee:feeO});
+    if(p.cash<0) E.enterBankruptcy(S,p);
+    break; }
+
+  case "FUT_CLOSE": {
+    if(p.bankrupt) return reject("BANKRUPT");
+    if(S.phase!=="ROLL" && S.phase!=="READY_END") return reject("WRONG_PHASE");
+    if(!E.m9On(S)) return reject("NO_M9");
+    var caF=E.futPositions(p).filter(function(x){ return x.instanceId===action.payload.instanceId; })[0];
+    if(!caF) return reject("NO_POSITION");
+    accept();
+    E.futClose(S,p,caF,{});
+    break; }
+
+  case "FUT_TOPUP": {
+    if(p.bankrupt) return reject("BANKRUPT");
+    if(!E.m9On(S)) return reject("NO_M9");
+    var taF=E.futPositions(p).filter(function(x){ return x.instanceId===action.payload.instanceId; })[0];
+    if(!taF) return reject("NO_POSITION");
+    var amtF=util.r2(action.payload.amount||0);
+    if(!(amtF>0)) return reject("BAD_AMOUNT");
+    if(p.cash<amtF) return reject("NO_CASH");
+    accept();
+    taF.marketValue=util.r2(taF.marketValue+amtF);
+    taF.costBasis=util.r2((taF.costBasis||0)+amtF);
+    ledger.post(S,p,"補繳保證金："+taF.name,
+      [{account:"CASH",delta:-amtF,label:"補繳保證金"},
+       {account:"ASSET",delta:amtF,refId:taF.instanceId,label:"保證金餘額"}],
+      {eduTags:["futures"]});
+    ev("FUT_TOPPED_UP",{playerId:p.id, instanceId:taF.instanceId, amount:amtF});
+    break; }
+
   case "TRADE_STOCK": {
     if(p.bankrupt) return reject("BANKRUPT");
     if(S.phase!=="ROLL" && S.phase!=="READY_END") return reject("WRONG_PHASE");
@@ -351,12 +429,21 @@ E.apply = function(state, action, opts){
     // S16：已下市＝壁紙，不能再交易。原本沒有這道檢查，加上 `||def.face` 的退路，
     // 玩家可以用面額買進一檔已經歸零的股票，而且帳上還記成有價值的資產。
     if(E.isDelisted(S,def) && side==="buy") return reject("DELISTED");
+    /* S23c：進階標的（迷因幣）的解鎖閘門。賣出一律放行——已經買到手的東西
+       不能因為關掉開關就變成賣不掉的壁紙（那會讓帳掛在身上永遠出不來）。 */
+    if(side==="buy"){
+      var tr = E.stockTradable(S, p, def);
+      if(tr) return reject(tr);
+    }
     var price=E.stockPrice(S,def);
     if(side==="buy" && !(price>0)) return reject("NO_PRICE");
     // 六期：現股與融資分倉
     var ex=p.assets.filter(function(x){return x.kind==="STOCK"&&x.symbol===sym&&!(x.flags&&x.flags.margin);})[0];
     if(side==="buy"){
       var margin = action.payload.margin && E.canUseAdvanced(S) && S.enabledModules.indexOf("M1")>=0;
+      // S23c：迷因幣不能融資。沒有券商會拿一個沒有盈餘、單輪能動 ±50% 的東西當擔保品；
+      // 遊戲設計上也不該讓「歸零機率兩倍」的標的再疊一層槓桿。
+      if(margin && def.noMargin) return reject("NO_MARGIN_ASSET");
       // S15b：紀律閘門擋在引擎層（UI 灰化只是提示，不能當把關）
       if(margin){
         var mb = E.marginBlockReason(S, p);
@@ -367,7 +454,7 @@ E.apply = function(state, action, opts){
       var bc = E.stockBuyCost(S, def, total, ownCash);      // S15b：自備款＋手續費
       if(p.cash<bc.cash) return reject("NO_CASH");
       accept();
-      var div=util.r2(units*def.face*def.dividendYieldMonthly);
+      var div=util.r2(units*E.stockDivPerUnit(S,def));      // S23a：股息走統一入口（含殖利率上限與景氣係數）
       var mergeTo = margin ? null : ex;                       // 融資一律獨立部位
       var aid=mergeTo?mergeTo.instanceId:util.uid(S,"A");
       if(mergeTo){ mergeTo.units+=units; mergeTo.costBasis=util.r2(mergeTo.costBasis+total);
@@ -1425,6 +1512,8 @@ E.payday = function(S,p){
   var net = util.r2(salary + d.passiveIncome - d.totalExpenses);
   var detail = { salary:salary, baseSalary:d.salaryIncome, vol:vol, volLabel:volLabel,
                  passive:d.passiveIncome, expense:d.totalExpenses, net:net,
+                 // S23a.1：被動收入拆成租金／事業／股息／數位長尾／P2P，每輪紀錄與薪資單都看得到組成
+                 passiveRows:(E.passiveBreakdown ? E.passiveBreakdown(S,p).rows : null),
                  stage:S.macro.stage, turn:S.turnNumber };
   p.stats.paydays++;
   var settleLabel = salary>0 ? "發薪日結算" : "現金流結算（被動收入）";
@@ -1528,8 +1617,8 @@ E.landing = function(S,p,space){
         p.dreamProgress++; p.stats.freeProgress++;
         var mItemFree = E.dreamMilestoneData(S, p, p.dreamProgress);
         E.ev("DREAM_PROGRESS",{playerId:p.id, progress:p.dreamProgress, paid:false,
-          milestone: mItemFree ? mItemFree.title : E.dreamMilestone(S,p,p.dreamProgress),
-          imageFile: mItemFree ? mItemFree.imageFile : null,
+          milestone:E.dreamMilestone(S,p,p.dreamProgress),
+          milestoneImg:E.dreamMilestoneImg(S,p,p.dreamProgress),   // S24：全服公告要配圖
           dreamName:(dream?dream.name:"")});
         E.checkDreamWin(S,p);
         if(!S.over && !p.isNPC) E.pushDecision(S,p,{kind:"ACK", site:{category:space.category}});
@@ -1584,17 +1673,20 @@ E.cardUsable = function(S,p,c){
   }
   // M8 S3：已經會的技能就不必再送一次（否則玩家白付教材費卻什麼也沒得到）
   if(c.requiresNotSkill && E.hasSkill(p, c.requiresNotSkill)) return false;
+  // S22：階梯技能——先修沒學會，高階卡抽到也學不了，直接跳過（進棄牌堆，之後仍會回來）
+  if(c.kind==="SKILL" && c.requiresSkill && !E.hasSkill(p, c.requiresSkill)) return false;
+  // S22：獨立董事邀請等「要有資格才會找上門」的卡：列出的技能至少會一項
+  if(c.requiresAnySkill && !c.requiresAnySkill.some(function(sid){ return E.hasSkill(p, sid); })) return false;
+  if(c.kind==="SPECIAL" && c.payload && c.payload.decisionKind==="APPOINT_DIRECTOR"
+     && (p.directorship || p.playerStage!=="INNER")) return false;   // 同時只能兼一席；外圈不接
   if(c.kind==="TAPESTRY" && c.virtueAxis==="PARENTING" && p.childrenCount<=0) return false;
   if(c.kind==="LIFE_EVENT" && c.effects && c.effects.some(function(e){return e.op==="ADD_CHILD";})
      && p.childrenCount>=S.config.childExpenseCap) return false;
   if(c.kind==="STARTUP" && S.enabledModules.indexOf("M3")<0) return false;
   // S7b：已下市的股票不會再有人賣給你
   if(c.kind==="STOCK" && S.delisted && S.delisted[(c.payload||{}).symbol]) return false;
-  if(c.requiresAnySkill && Array.isArray(c.requiresAnySkill)){
-    var hasAny = c.requiresAnySkill.some(function(sk){ return E.hasSkill(p, sk); });
-    if(!hasAny) return false;
-  }
-  if(c.id === "OPP_INDEPENDENT_DIRECTOR" && p.directorship) return false;
+  // S22：吸金盤每張一局只找上門一次——被騙過（或拒絕過）的同一個局，不會再遇到同一個介紹人
+  if(c.payload && c.payload.isScam && p.scamSeen && p.scamSeen[c.id]) return false;
   return true;
 };
 
@@ -1610,6 +1702,7 @@ E.presentCard = function(S,p,card){
       }
       break;
     case "REALESTATE": case "STOCK": case "BUSINESS": case "STARTUP":
+      if(card.payload && card.payload.isScam){ p.scamSeen=p.scamSeen||{}; p.scamSeen[card.id]=1; }   // S22
       E.pushDecision(S,p,{ kind:"BUY", cardId:card.id }); break;
     case "LIFESTYLE":
       if(card.payload.optional){ p.stats.optionalSeen++;
@@ -1643,6 +1736,11 @@ E.presentCard = function(S,p,card){
     case "CHOICE":
       if(card.oncePerLife) p.professionEventDone[card.id]=true;   // C1：讓 CHOICE 的 oncePerLife 真正生效
       E.pushDecision(S,p,{ kind:"CHOICE", cardId:card.id });
+      break;
+    case "SPECIAL":                                   // S22：payload.decisionKind 指定要開哪種決策
+      if(card.payload && card.payload.decisionKind)
+        E.pushDecision(S,p,{ kind:card.payload.decisionKind, cardId:card.id });
+      else E.pushDecision(S,p,{ kind:"ACK", cardId:card.id });
       break;
     case "SKILL":                                     // M8 S1：抽到技能卡 → 要不要學
       E.pushDecision(S,p,{ kind:"LEARN_SKILL", cardId:card.id });
@@ -1743,42 +1841,63 @@ E.resolveTrial = function(S,p,card){
 /* ============================== 決策解析 ================================= */
 E.resolveDecision = function(S,p,d,optionId,params){
   switch(d.kind){
+    /* S22：獨立董事——審計預警後的請辭抉擇。
+       S21 原版把「請辭」記成一筆 delta 0 的分錄；ledger.post 會把 0 金額的分錄整筆丟掉，
+       徽章又是靠掃分錄摘要判定，等於永遠拿不到。改成寫 stats 旗標。 */
     case "RESIGN_DIRECTORSHIP": {
-      if (optionId === "resign" && p.directorship) {
+      if(optionId==="resign" && p.directorship){
         p.directorship.resigned = true;
-        E.ev("DIRECTOR_RESIGNED", { playerId: p.id, company: p.directorship.title });
-        ledger.post(S, p, "請辭獨立董事：" + p.directorship.title,
-          [{ account: "CASH", delta: 0, label: "及時辭任避險" }], { eduTags: ["directorship", "risk-control"] });
-      } else if (p.directorship) {
-        E.ev("DIRECTOR_STAYED", { playerId: p.id, company: p.directorship.title });
+        p.stats.directorResigned = (p.stats.directorResigned||0) + 1;
+        E.ev("DIRECTOR_RESIGNED", { playerId:p.id, company:p.directorship.title });
+      } else if(p.directorship){
+        E.ev("DIRECTOR_STAYED", { playerId:p.id, company:p.directorship.title });
       }
       break;
     }
     case "APPOINT_DIRECTOR": {
-      if (optionId === "appoint") {
-        var comp = (params && params.company) || d.companyType || "B";
-        var compDefs = {
-          A: { title: "大型績優權值股", income: 8, hasInsurance: true, crashTurn: S.turnNumber + 999, fineAmount: 40 },
-          B: { title: "成長型科技新創板", income: 15, hasInsurance: true, crashTurn: S.turnNumber + util.randInt(S, 3, 5), fineAmount: 120 },
-          C: { title: "爭議家族小型股", income: 25, hasInsurance: false, crashTurn: S.turnNumber + util.randInt(S, 2, 4), fineAmount: 200 }
-        };
-        var sel = compDefs[comp] || compDefs.B;
+      if(optionId==="appoint"){
+        var comp = (params && params.company) || "A";
+        var sel = E.DIRECTOR_COMPANIES[comp] || E.DIRECTOR_COMPANIES.A;
+        var crashAt = sel.crashMin ? S.turnNumber + util.randInt(S, sel.crashMin, sel.crashMax) : null;
         p.directorship = {
-          companyType: comp,
-          title: sel.title,
-          monthlyIncome: sel.income,
-          hasInsurance: sel.hasInsurance,
-          crashTurn: sel.crashTurn,
-          fineAmount: sel.fineAmount,
-          termTurnsLeft: 6,
-          warned: false,
-          resigned: false
+          companyType: comp, title: sel.title, monthlyIncome: sel.income,
+          hasInsurance: sel.hasInsurance, crashTurn: crashAt, fineAmount: sel.fineAmount,
+          termTurnsLeft: sel.term, warned: false, resigned: false
         };
-        E.ev("DIRECTOR_APPOINTED", { playerId: p.id, company: sel.title, income: sel.income });
-        ledger.post(S, p, "就任獨立董事：" + sel.title,
-          [{ account: "CASH", delta: sel.income, label: "就任當期車馬費" }], { eduTags: ["directorship", "passive-income"] });
+        p.stats.directorAppointed = (p.stats.directorAppointed||0) + 1;
+        E.ev("DIRECTOR_APPOINTED", { playerId:p.id, company:sel.title, income:sel.income });
+        ledger.post(S, p, "就任獨立董事："+sel.title,
+          [{ account:"CASH", delta:sel.income, label:"就任當期車馬費" }], { eduTags:["directorship","passive-income"] });
+      } else {
+        p.stats.directorDeclined = (p.stats.directorDeclined||0) + 1;
       }
       break;
+    }
+    /* S23b：期貨追繳——補到原始保證金水位，或當場平倉認賠。
+       不補也不平就等於選擇「賭下一輪」，餘額燒完會被強制平倉（tickFutures）。 */
+    case "FUT_MARGIN_CALL": {
+      var aMC = E.futPositions(p).filter(function(x){ return x.instanceId===d.instanceId; })[0];
+      if(!aMC) break;
+      if(optionId==="close"){ E.futClose(S,p,aMC,{}); break; }
+      if(optionId==="topup"){
+        var defMC = E.futDef(aMC.symbol);
+        var wantMC = util.r2(E.futContractValue(S,defMC)*(aMC.lots||0)*E.futMarginPct(S,defMC));
+        var addMC = util.r2(Math.max(0, wantMC - (aMC.marketValue||0)));
+        if(addMC>0 && p.cash>=addMC){
+          aMC.marketValue=util.r2(aMC.marketValue+addMC);
+          aMC.costBasis=util.r2((aMC.costBasis||0)+addMC);
+          ledger.post(S,p,"補繳保證金："+aMC.name,
+            [{account:"CASH",delta:-addMC,label:"補繳至原始保證金"},
+             {account:"ASSET",delta:addMC,refId:aMC.instanceId,label:"保證金餘額"}],
+            {eduTags:["futures"]});
+          E.ev("FUT_TOPPED_UP",{playerId:p.id, instanceId:aMC.instanceId, amount:addMC});
+          if(p.cash<0) E.enterBankruptcy(S,p);
+        } else if(addMC>0){
+          E.futClose(S,p,aMC,{});          // 補不出來就只能平倉
+        }
+        break;
+      }
+      break;   // hold：什麼都不做，賭下一輪
     }
     case "ACK": case "TRIAL_RESULT": case "BLESSING": case "SKILL_RESULT":
     case "DIGITAL_RESULT": break;   // 起飛結果已於 tickDigital 結算，此處純揭曉
@@ -1816,6 +1935,7 @@ E.resolveDecision = function(S,p,d,optionId,params){
     case "LEARN_SKILL": {
       var lc = ns.content.byId[d.cardId];
       if(optionId==="learn" && lc && !p.learning
+         && !(lc.requiresSkill && !E.hasSkill(p, lc.requiresSkill))   // S22：階梯技能先修
          && !(p.skills[lc.id] && !p.skills[lc.id].decayed)
          && S.turnNumber >= (p.skillCooldownUntil||0)
          && p.cash >= E.skillPrice(S,lc,true)){
@@ -2004,7 +2124,9 @@ E.resolveDecision = function(S,p,d,optionId,params){
 
     case "BUY": {
       var card=ns.content.byId[d.cardId];
-      if(optionId==="skip"){ p.stats.passedOpps++; break; }
+      if(optionId==="skip"){ p.stats.passedOpps++;
+        if(card && card.payload && card.payload.isScam) p.stats.scamPassed=(p.stats.scamPassed||0)+1;   // S22：徽章「鋼鐵避險王」
+        break; }
       E.buyAsset(S,p,card,optionId,params);
       break; }
 
@@ -2100,7 +2222,7 @@ E.buyAsset = function(S,p,card,optionId,params){
     var def = ns.content.stockBySymbol[pl.symbol];
     // 六期：現股與融資分倉——融資買進一律獨立部位（各自維持率），現股只與現股合併
     var ex = margin ? null : p.assets.filter(function(x){return x.kind==="STOCK"&&x.symbol===pl.symbol&&!(x.flags&&x.flags.margin);})[0];
-    var div = util.r2(units*def.face*def.dividendYieldMonthly);
+    var div = util.r2(units*E.stockDivPerUnit(S,def));      // S23a：同上
     if(ex){ ex.units+=units; ex.costBasis=util.r2(ex.costBasis+total); ex.marketValue=util.r2(ex.marketValue+total);
       ex.monthlyIncome=util.r2(ex.monthlyIncome+div); id=ex.instanceId;
       ex.ownCash=util.r2((ex.ownCash!==undefined?ex.ownCash:ex.costBasis-total)+ownCash); }   // S14a：加碼也累加自備現金
@@ -2154,6 +2276,13 @@ E.buyAsset = function(S,p,card,optionId,params){
       postB.push({account:"EXPENSE",delta:cLoanO.monthlyPayment,refId:cid,label:name+" 貸款月付"});
     }
     ledger.post(S,p,(loanB>0?"貸款買下事業：":"買下事業：")+name,postB,{eduTags:loanB>0?["business","leverage","passive-income"]:["business","passive-income"]});
+    // S22：偽裝成事業的吸金盤——先照常配息，到期資金鏈斷裂整筆歸零（見 E.tickScamInvestments）
+    if(pl.isScam){
+      p.scamInvestments = p.scamInvestments||[];
+      p.scamInvestments.push({ instanceId:id, cardId:card.id, title:name,
+        crashTurn: S.turnNumber + (pl.scamDelayTurns||3) });
+      p.stats.scamBought = (p.stats.scamBought||0) + 1;
+    }
 
   } else if(card.kind==="STARTUP"){
     var invAmt = util.r2(pl.investAmount||0);                 // 缺欄位防禦（鐵律一）
@@ -2302,16 +2431,57 @@ E.tickDelistWarn = function(S, p){
   if(S.delisted && S.delisted[w.symbol]) return;                  // 已經來不及了
   if(!(S.delistWatch && S.delistWatch[w.symbol])) return;          // 警示已解除
   if(!p.assets.some(function(a){ return a.kind==="STOCK" && a.symbol===w.symbol; })) return;  // 已經賣掉了
-  E.pushDecision(S,p,{ kind:"DELIST_WARN", symbol:w.symbol, until:w.until });
+  E.pushDecision(S,p,{ kind:"DELIST_WARN", symbol:w.symbol, until:w.until,
+                       hazard:w.hazard, level:w.level });   // S23a：機率模式帶風險等級
 };
 
 E.delistOn = function(S){
   if(!E.cfg(S,"delistEnabled")) return false;
   return S.enabledModules.indexOf("M1")>=0;
 };
+E.delistHazardMode = function(S){ return E.cfg(S,"delistMode")!=="fixed"; };   // 預設 hazard
+
+/* S23a：每局暗抽一個「跌到多深才算進入危險區」的門檻。
+   S22 是固定的面額 20%，玩家玩兩局就背起來了（實測回饋：「跌到 1200 就知道要倒」）。
+   改成開局在 delistDdMin~delistDdMax 之間抽一次、整局不變、種子決定（重放仍決定論），
+   玩家只知道大概範圍，不知道這一局的確切數字。                              */
+E.delistThresholdFor = function(S, def){
+  if(!def) return 1;
+  S.delistThreshold = S.delistThreshold || {};
+  if(S.delistThreshold[def.symbol]===undefined){
+    var lo=E.cfg(S,"delistDdMin"); if(lo===undefined) lo=0.75;
+    var hi=E.cfg(S,"delistDdMax"); if(hi===undefined) hi=0.90;
+    S.delistThreshold[def.symbol] = util.r2(lo + util.rand(S)*(hi-lo));
+  }
+  return S.delistThreshold[def.symbol];
+};
+// 這檔股票「這一輪」的倒閉機率（0＝安全）。純函式：只讀狀態不改狀態（門檻的暗抽除外）。
+E.delistHazard = function(S, def){
+  if(!E.delistOn(S) || !def) return 0;
+  var mult = (def.delistHazardMult!==undefined && isFinite(def.delistHazardMult))
+             ? def.delistHazardMult : (def.delistable ? 1 : 0);
+  if(!(mult>0)) return 0;                                  // 不會倒的股票（ETF、高股息）
+  if(S.delisted && S.delisted[def.symbol]) return 0;
+  var stage = S.enabledModules.indexOf("M4")>=0 ? (S.macro&&S.macro.stage) : null;
+  var base = 0;
+  if(stage==="RECESSION"){ base=E.cfg(S,"delistHazardRecession"); if(base===undefined) base=0.08; }
+  else if(stage==="DEPRESSION"){ base=E.cfg(S,"delistHazardDepression"); if(base===undefined) base=0.25; }
+  if(!(base>0)) return 0;                                  // 景氣好的時候撐得住，跌再深也不會倒
+  var price = S.stockPrices[def.symbol];
+  if(!isFinite(price) || !(def.face>0)) return 0;
+  var dd = 1 - price/def.face;                             // 從面額算起的跌幅
+  if(dd < E.delistThresholdFor(S,def)) return 0;           // 還沒進危險區
+  if(dd >= 0.90) base *= 2;                                // 跌破九成：風險加倍
+  var w = (S.delistWatch||{})[def.symbol];
+  var streak = w ? (w.streak||1) : 1;                      // 在危險區撐越久越危險
+  var per = E.cfg(S,"delistHazardPerTurn"); if(per===undefined) per=0.03;
+  return Math.max(0, Math.min(0.9, util.r2((base + per*(streak-1)) * mult)));
+};
+E.delistRiskLevel = function(h){ return h<=0 ? null : (h<0.1 ? "低" : (h<0.25 ? "中" : "高")); };
 // 這檔股票現在符合「快下市」的條件嗎（純判斷，不改狀態）
 E.delistRisk = function(S, def){
   if(!E.delistOn(S)) return false;
+  if(E.delistHazardMode(S)) return E.delistHazard(S,def) > 0;
   if(!def.delistable) return false;              // 只有投機股會走到下市
   if(S.delisted && S.delisted[def.symbol]) return false;
   var stage = S.enabledModules.indexOf("M4")>=0 ? (S.macro&&S.macro.stage) : null;
@@ -2322,15 +2492,47 @@ E.delistRisk = function(S, def){
   return price <= util.r2(def.face*ratio);
 };
 
-E.tickDelist = function(S){
+/* S23c：defs 可指定要判定哪一批（迷因幣的報價在 M9 才更新，所以它的歸零判定也要
+   跟在 M9 後面跑，不能跟股票一起在 M1 判）。不傳＝維持原行為，只判 stockDefs。 */
+E.tickDelist = function(S, defs){
   if(!E.delistOn(S)) return;
   S.delistWatch = S.delistWatch||{}; S.delisted = S.delisted||{};
   var warnT = E.cfg(S,"delistWarnTurns"); if(warnT===undefined) warnT=2;
-  ns.content.stockDefs.forEach(function(def){
+  var hazMode = E.delistHazardMode(S);
+  (defs || ns.content.stockDefs).forEach(function(def){
     var sym=def.symbol;
     if(S.delisted[sym]) return;
-    var risky = E.delistRisk(S, def);
     var w = S.delistWatch[sym];
+    /* S23a 機率制：進危險區先給一輪緩衝（只警示不擲），之後每輪擲一次。
+       撐過去不代表安全，撐越久機率越高；景氣回來或價格漲回去就解除。 */
+    if(hazMode){
+      var haz = E.delistHazard(S, def);
+      if(!haz){
+        if(w){ delete S.delistWatch[sym];
+          S.players.forEach(function(pl){
+            if(pl.pendingDelistWarn && pl.pendingDelistWarn.symbol===sym) pl.pendingDelistWarn=null; });
+          E.ev("DELIST_CLEARED",{symbol:sym, name:E.stockName(S,sym)}); }
+        return;
+      }
+      var lvl = E.delistRiskLevel(haz);
+      if(!w){
+        S.delistWatch[sym] = { since:S.turnNumber, streak:1, hazard:haz, level:lvl };
+        E.ev("DELIST_WARNED",{symbol:sym, name:E.stockName(S,sym), price:S.stockPrices[sym],
+                              hazard:haz, level:lvl});
+        E.markDelistWarn(S, sym, {symbol:sym, hazard:haz, level:lvl});
+        return;                                    // delistGraceTurns：第一輪只警示，不擲
+      }
+      var prevLvl = w.level;
+      w.streak = (w.streak||1)+1; w.hazard = haz; w.level = lvl;
+      if(lvl!==prevLvl){                           // 風險等級變了才重跳卡，不要每輪都吵
+        E.ev("DELIST_RISK_CHANGED",{symbol:sym, name:E.stockName(S,sym), hazard:haz, level:lvl, from:prevLvl});
+        E.markDelistWarn(S, sym, {symbol:sym, hazard:haz, level:lvl});
+      }
+      if(util.rand(S) >= haz) return;              // 這一輪撐過去了
+      E.doDelist(S, def);
+      return;
+    }
+    var risky = E.delistRisk(S, def);
     if(!w){
       if(!risky) return;
       S.delistWatch[sym] = { since:S.turnNumber, until:S.turnNumber+warnT };
@@ -2356,6 +2558,26 @@ E.tickDelist = function(S){
       return;
     }
     if(S.turnNumber < w.until) return;                 // 還在緩衝期
+    E.doDelist(S, def);
+  });
+};
+
+// 警示要跳給持股者看，但【不能在這裡推決策】——tickDelist 跑在回合結束，
+// 此時的「當前玩家」不一定是持股者。引擎的不變式是「待決策一定屬於當前玩家」：
+// ui.tick 只驅動當前玩家，而畫面等的是決策的擁有者；兩者不一致就沒人會去動它 → 整局死當。
+// 所以先記在玩家身上，等輪到他自己時（E.beginTurn → E.tickDelistWarn）再跳卡。
+E.markDelistWarn = function(S, sym, info){
+  S.players.forEach(function(pl){
+    if(pl.bankrupt) return;
+    if(!pl.assets.some(function(a){ return a.kind==="STOCK" && a.symbol===sym && !(a.flags&&a.flags.wallpaper); })) return;
+    pl.pendingDelistWarn = info;
+  });
+};
+
+/* 真的下市：持股歸零、留一張市值 0 的壁紙當紀錄。融資的債不會跟著消失
+   ——sellAsset(…,0) 會把它轉成信貸留在身上（S23a 機率制沿用同一條路）。 */
+E.doDelist = function(S, def){
+  var sym = def.symbol;
     // 下市：持股歸零。融資的債不會消失——sellAsset(…,0) 會把它轉成信貸留在身上。
     S.delisted[sym]=true; delete S.delistWatch[sym];
     S.stockPrices[sym]=0;
@@ -2390,7 +2612,364 @@ E.tickDelist = function(S){
                          return a.flags && a.flags.wallpaper && a.symbol===sym
                                 && a.flags.delistedAt===S.turnNumber; }),
                          function(a){ return a.flags.lostAmount||0; }); }))});
+};
+
+
+/* ==================== S23b：M9 進階金融 ====================
+   兩個東西：解鎖（誰有資格下場）與期貨（第一個上場的商品）。
+   設計原則沿用整套遊戲的規矩：所有數字掛 config、亂數走 util.rand(S)、
+   決策一律推給「決策的擁有者」在他自己的回合處理（S15d 的死結教訓）。   */
+
+E.m9On = function(S){
+  if(S.enabledModules.indexOf("M9")<0) return false;
+  var v = E.cfg(S,"advancedMarketsEnabled");
+  return v===undefined ? true : !!v;
+};
+/* 解鎖條件（Brian 定案）：學會〈衍生性商品與槓桿〉，**或**任一檔股票【累計】持有滿 N 輪。
+   累計而非連續——中途賣掉再買回來，前面累積的經驗不該歸零。 */
+E.tickHoldTurns = function(S){
+  S.players.forEach(function(p){
+    if(p.bankrupt) return;
+    var holds = (p.assets||[]).some(function(a){
+      return a.kind==="STOCK" && (a.units>0) && !(a.flags && a.flags.wallpaper); });
+    if(holds) p.stockHoldTurns = (p.stockHoldTurns||0) + 1;
   });
+};
+E.advUnlockNeed = function(S){
+  var n = E.cfg(S,"advUnlockHoldTurns"); return n===undefined ? 12 : n;
+};
+E.advancedUnlocked = function(S, p){
+  if(!E.m9On(S) || !p) return false;
+  if(E.hasSkill && E.hasSkill(p,"SKL_DERIV")) return true;
+  return (p.stockHoldTurns||0) >= E.advUnlockNeed(S);
+};
+// 還差什麼才解得開——介面用（反灰時要說得出原因）
+E.advLockReason = function(S, p){
+  if(!E.m9On(S)) return "本局沒有開啟「M9 進階金融」模組";
+  if(E.advancedUnlocked(S,p)) return null;
+  var left = Math.max(0, E.advUnlockNeed(S) - (p.stockHoldTurns||0));
+  return "還差 "+left+" 輪持股經驗（已累計 "+(p.stockHoldTurns||0)+" 輪），或學會〈衍生性商品與槓桿〉";
+};
+
+/* ------------------------------ 期貨 ------------------------------
+   一口的合約值 ＝ 標的現價 × 契約乘數；開倉只付 marginPct（原始保證金），
+   之後每輪依標的漲跌把損益直接加減在保證金餘額上（逐日結算的遊戲版）。
+   做多做空都可以——這是「進階」的意義：方向判斷錯的代價一樣被放大。 */
+E.futDef = function(sym){ return ns.content.futBySymbol ? ns.content.futBySymbol[sym] : null; };
+/* S23b.1：期貨有自己的報價，不會等於現貨。
+   真實市場的期貨相對現貨有「基差」（折價／溢價）——市場看多就溢價、看空就折價。
+   這裡每輪重抽一次基差（±basisMax，預設 1%），期貨價 ＝ 現貨 × (1＋基差)。
+   結算走期貨價而不是現貨價，所以基差本身也會影響損益——這正是期貨與現貨的差別。 */
+/* 純讀取，【不得】在這裡抽亂數——介面每次重繪都會呼叫它，
+   若在這裡消耗 util.rand(S)，亂數序列就會被「玩家看了幾次畫面」影響，
+   重放就對不起來（實測：重放在第 2 輪就與原局分歧）。抽基差只在 tickFutures 裡做。 */
+E.futBasis = function(S, def){
+  if(!def || !S.futBasis) return 0;
+  var v = S.futBasis[def.symbol];
+  return (v===undefined || !isFinite(v)) ? 0 : v;
+};
+E.rollFutBasis = function(S, def){
+  if(!def) return;
+  S.futBasis = S.futBasis || {};
+  var mx = E.cfg(S,"futBasisMax"); if(mx===undefined) mx = 0.01;
+  S.futBasis[def.symbol] = util.r2((util.rand(S)*2-1) * mx * 1000)/1000;   // 保留到千分位
+};
+E.futPrice = function(S, def){
+  if(!def) return 0;
+  var u = E.stockPrice(S, def.underlying);
+  if(!(u>0)) return 0;
+  return util.r2(u * (1 + E.futBasis(S,def)));
+};
+E.futContractValue = function(S, def){
+  if(!def) return 0;
+  var mult = def.multiplier || 1;
+  return util.r2(E.futPrice(S,def) * mult);
+};
+E.futMarginPct = function(S, def){
+  var v = E.cfg(S,"futMarginPct");
+  if(v===undefined || !isFinite(v)) v = (def && def.marginPct) || 0.1;
+  return v;
+};
+// 維持保證金比例：學過衍生性商品的人門檻較寬（懂結算規則的人不用被抓那麼緊）
+E.futMaintPct = function(S, def, p){
+  var k = (p && E.hasSkill && E.hasSkill(p,"SKL_DERIV")) ? "futMaintPctSkilled" : "futMaintPct";
+  var v = E.cfg(S,k);
+  if(v===undefined || !isFinite(v)) v = (def && def.maintPct) || 0.05;
+  return v;
+};
+E.futFee = function(S, lots){
+  var f = E.cfg(S,"futFeePerLot"); if(f===undefined) f = 0.3;
+  return util.r2(f * Math.max(0, lots));
+};
+// 口數上限依信用評級——槓桿不是誰都能開一樣多
+E.futMaxLots = function(S, p){
+  var g = (p && p.creditRating) || "B";
+  var v = E.cfg(S,"futMaxLots_"+g);
+  if(v===undefined || !isFinite(v)) v = 3;
+  return v;
+};
+E.futPositions = function(p){
+  return (p.assets||[]).filter(function(a){ return a.kind==="FUTURES"; });
+};
+E.futLotsHeld = function(p, sym){
+  return E.futPositions(p).filter(function(a){ return !sym || a.symbol===sym; })
+    .reduce(function(n,a){ return n + (a.lots||0); }, 0);
+};
+// 這個部位現在的維持率狀態
+E.futStatus = function(S, a, p){
+  var def = E.futDef(a.symbol);
+  var cv = util.r2(E.futContractValue(S,def) * (a.lots||0));
+  var need = util.r2(cv * E.futMaintPct(S,def,p));
+  return { contractValue:cv, maintNeed:need, margin:util.r2(a.marketValue||0),
+           ratio: need>0 ? util.r2((a.marketValue||0)/need) : 0,
+           call: (a.marketValue||0) < need };
+};
+
+/* 逐輪結算：標的漲跌 × 契約乘數 × 口數 × 方向，直接加減保證金餘額。
+   餘額 ≤ 0 → 強制平倉，超額虧損轉信貸（與融資斷頭同一套規矩：債不會憑空消失）。
+   餘額低於維持保證金 → 記在玩家身上，等他自己的回合再跳追繳卡（S15d 的死結教訓）。 */
+E.tickFutures = function(S){
+  if(!E.m9On(S)) return;
+  // 先重抽這一輪的基差（折溢價），再用新的期貨價結算
+  (ns.content.futuresDefs||[]).forEach(function(fd){ E.rollFutBasis(S, fd); });
+  S.players.forEach(function(p){
+    if(p.bankrupt) return;
+    E.futPositions(p).slice().forEach(function(a){
+      var def = E.futDef(a.symbol); if(!def) return;
+      var now = E.futPrice(S, def);
+      var prev = (a.lastPrice!==undefined && isFinite(a.lastPrice)) ? a.lastPrice : a.entryPrice;
+      var dir = a.side==="short" ? -1 : 1;
+      var pnl = util.r2((now - prev) * (def.multiplier||1) * (a.lots||0) * dir);
+      a.lastPrice = now;
+      if(pnl){
+        a.marketValue = util.r2((a.marketValue||0) + pnl);
+        ledger.post(S, p, "期貨逐輪結算："+def.name+"（"+(a.side==="short"?"空":"多")+" "+a.lots+" 口）",
+          [{account:"ASSET", delta:pnl, refId:a.instanceId,
+            label:"期貨報價 "+util.money(prev)+" → "+util.money(now)+
+                  "（現貨 "+util.money(E.stockPrice(S,def.underlying))+"、"+
+                  (E.futBasis(S,def)>=0?"溢價":"折價")+" "+util.pct(Math.abs(E.futBasis(S,def)),1)+"）"}],
+          {eduTags:["futures","leverage"], detail:{from:prev, to:now, lots:a.lots, side:a.side, pnl:pnl}});
+      }
+      var st = E.futStatus(S,a,p);
+      /* S23b.1（Brian 定案）：保證金燒光時，只要現金補得起就【自動補倉】，不要直接強平。
+         現實裡券商也是先通知補繳，補得出來就不會斷頭；直接砍倉對玩家太粗暴。
+         補倉順序：先試著補回原始保證金；補不到就補到剛好活著的維持水位；
+         連維持水位都補不出來，才強制平倉。 */
+      if(a.marketValue <= 0 || st.call){
+        var autoOn = E.cfg(S,"futAutoTopUp"); if(autoOn===undefined) autoOn = 1;
+        if(autoOn && a.marketValue <= 0){
+          var wantFull = util.r2(st.contractValue * E.futMarginPct(S,def));
+          var needFull = util.r2(wantFull - a.marketValue);
+          var needLive = util.r2(st.maintNeed - a.marketValue);
+          var add = (p.cash >= needFull) ? needFull : ((p.cash >= needLive) ? needLive : 0);
+          if(add > 0){
+            a.marketValue = util.r2(a.marketValue + add);
+            a.costBasis = util.r2((a.costBasis||0) + add);
+            p.stats.futAutoTopUp = (p.stats.futAutoTopUp||0) + 1;
+            ledger.post(S, p, "自動補繳保證金："+def.name+"（避免被強制平倉）",
+              [{account:"CASH", delta:-add, label:"自動補繳"},
+               {account:"ASSET", delta:add, refId:a.instanceId, label:"保證金餘額"}],
+              {eduTags:["futures","margin-call"]});
+            E.ev("FUT_AUTO_TOPUP",{playerId:p.id, instanceId:a.instanceId, amount:add,
+                                   full:(add===needFull)});
+            E.queueFutNotice(p, { title:"💸 自動補繳保證金："+def.name,
+              text:"保證金已經見底，系統從你的現金自動補了 "+util.money(add)+
+                   (add===needFull?"（補回原始保證金）":"（只補到勉強活著的維持水位）")+
+                   "。部位保住了，但錢是真的出去了——想停損請到股市面板平倉。" });
+            st = E.futStatus(S,a,p);
+          }
+        }
+        if(a.marketValue <= 0){                     // 補不出來 → 只能強制平倉
+          E.futForceClose(S,p,a);
+          return;
+        }
+      }
+      if(st.call){ p.pendingFutCall = { instanceId:a.instanceId, symbol:a.symbol,
+                                        need:util.r2(st.maintNeed - st.margin), ratio:st.ratio }; }
+    });
+  });
+};
+// 自己的回合開始才跳追繳卡（決策一定要屬於當前玩家）
+E.tickFutCall = function(S, p){
+  // 先倒出上一輪結算時累積的通知（自動補繳／強制平倉）
+  var nts = p.pendingFutNotices || [];
+  p.pendingFutNotices = [];
+  if(!p.bankrupt) nts.forEach(function(n){ E.pushDecision(S,p,{ kind:"ACK", title:n.title, text:n.text }); });
+  var w = p.pendingFutCall; if(!w) return;
+  p.pendingFutCall = null;
+  if(p.bankrupt) return;
+  var a = E.futPositions(p).filter(function(x){ return x.instanceId===w.instanceId; })[0];
+  if(!a) return;                                     // 已經平掉了
+  var st = E.futStatus(S,a,p);
+  if(!st.call) return;                               // 價格回來了，追繳解除
+  E.pushDecision(S,p,{ kind:"FUT_MARGIN_CALL", instanceId:a.instanceId, symbol:a.symbol,
+                       need:util.r2(st.maintNeed - st.margin), margin:st.margin,
+                       maintNeed:st.maintNeed, ratio:st.ratio });
+};
+// 平倉：退回保證金餘額減手續費。強平時餘額可能是負的 → 差額轉信貸。
+E.futClose = function(S, p, a, opts){
+  opts = opts||{};
+  var def = E.futDef(a.symbol) || { name:a.name, multiplier:1 };
+  var bal = util.r2(a.marketValue||0);
+  var fee = opts.noFee ? 0 : E.futFee(S, a.lots||0);
+  var post = [{account:"ASSET", delta:-bal, refId:a.instanceId, label:def.name+" 保證金結清"}];
+  var back = util.r2(bal - fee);
+  if(back > 0) post.push({account:"CASH", delta:back, label:"退回保證金"});
+  else if(back < 0) post.push({account:"CASH", delta:back, label:"平倉超額虧損"});
+  var pl = util.r2(bal - (a.costBasis||0));
+  ledger.post(S, p, (opts.forced?"強制平倉：":"平倉：")+def.name+"（"+(a.side==="short"?"空":"多")+" "+a.lots+" 口，損益 "+
+              (pl>=0?"+":"")+util.money(pl)+"）", post,
+              {eduTags:["futures","exit"], detail:{lots:a.lots, side:a.side, pl:pl, fee:fee}});
+  p.assets = p.assets.filter(function(x){ return x.instanceId!==a.instanceId; });
+  p.stats.futClosed = (p.stats.futClosed||0) + 1;
+  if(pl<0) p.stats.futLossTotal = util.r2((p.stats.futLossTotal||0) + Math.abs(pl));
+  E.ev(opts.forced?"FUT_FORCE_CLOSED":"FUT_CLOSED",
+       {playerId:p.id, symbol:a.symbol, lots:a.lots, side:a.side, pl:pl, fee:fee});
+  if(p.cash<0) E.enterBankruptcy(S,p);
+};
+E.futForceClose = function(S, p, a){
+  var short = util.r2(-(a.marketValue||0));          // 保證金穿價的部分
+  E.futClose(S,p,a,{forced:true, noFee:true});
+  if(short > 0){
+    // 穿價：券商先墊，轉成信貸留在身上（與融資斷頭同一條路）
+    var rate = E.rRate(S.macro.baseRate + E.cfg(S,"creditSpread"));
+    E.addLiability(S,p,"CONSUMER","期貨穿價欠款",short,rate,false,null,true);
+    E.ev("FUT_SHORTFALL",{playerId:p.id, amount:short});
+  }
+  E.queueFutNotice(p, { title:"💥 期貨強制平倉",
+    text:"保證金燒完了，部位已被強制平倉。"+(short>0?("穿價的 "+util.money(short)+" 轉成信用貸款留在你身上——槓桿賠掉的不只是本金。"):"") });
+};
+
+/* S23b.1：期貨的通知卡不能在回合結束當場推。
+   tickFutures 跑在【回合結束】，此時的「當前玩家」不一定是這個部位的主人；
+   引擎的不變式是「待決策一定屬於當前玩家」，推錯人就整局死當（S15d 踩過一次）。
+   所以先排隊，等輪到他自己（E.beginTurn → E.tickFutCall）再跳。 */
+E.queueFutNotice = function(p, notice){
+  p.pendingFutNotices = p.pendingFutNotices || [];
+  if(p.pendingFutNotices.length < 4) p.pendingFutNotices.push(notice);   // 防呆：不無限累積
+};
+
+/* ======================= S23c：M9 迷因幣（狗狗星幣） =======================
+   與期貨最大的不同：迷因幣走的是【現行的股票機制】——同一套買賣、同一套四層股價
+   模型、同一套下市（歸零）機率制。所以這裡沒有第二套交易程式碼，只有三件它自己的事：
+   ①幣圈循環（獨立於景氣的三態機）②託管風險（交易所倒閉 vs 冷錢包）③不能融資。
+
+   為什麼不把它塞進 stockDefs：那份陣列被開盤價迴圈、M1 逐輪報價、下市判定直接走訪，
+   多一檔就多消耗亂數，鐵律 4（開關全關要能逐位元重現基線）當場就斷。 */
+E.cryptoOn = function(S){
+  if(!E.m9On(S)) return false;
+  var v = E.cfg(S,"cryptoOn");
+  return v===undefined ? true : !!v;
+};
+// 本局實際存在的幣種；M9 沒開就是空陣列（所有迴圈自然跳過，不碰亂數）
+E.cryptoDefs = function(S){
+  return E.cryptoOn(S) ? (ns.content.cryptoDefs||[]) : [];
+};
+E.isCrypto = function(def){ return !!(def && def.custody); };
+E.cryptoDef = function(sym){
+  return (ns.content.cryptoDefs||[]).filter(function(d){ return d.symbol===sym; })[0] || null;
+};
+/* 能不能交易這個標的——一個入口。介面反灰只是提示，把關在引擎。
+   回傳 null＝可以；否則回傳拒絕碼。 */
+E.stockTradable = function(S, p, def){
+  if(!def) return "NO_SYMBOL";
+  if(!def.moduleReq) return null;                        // 一般股票：一律可交易
+  if(def.moduleReq==="M9"){
+    if(!E.m9On(S)) return "NO_M9";
+    if(E.isCrypto(def) && !E.cryptoOn(S)) return "NO_CRYPTO";
+    if(!E.advancedUnlocked(S,p)) return "ADV_LOCKED";     // 與期貨同一道解鎖閘門
+    return null;
+  }
+  return S.enabledModules.indexOf(def.moduleReq)>=0 ? null : "NO_MODULE";
+};
+
+/* ---- 幣圈循環：獨立於景氣的三態機 ---- */
+E.CRYPTO_STAGES = ["MANIA","RANGE","WINTER"];
+E.CRYPTO_STAGE_TEXT = { MANIA:"狂熱", RANGE:"盤整", WINTER:"寒冬" };
+E.CRYPTO_STAGE_ICON = { MANIA:"🚀", RANGE:"😐", WINTER:"🧊" };
+E.cryptoStage = function(S){ return S.cryptoCycle || "RANGE"; };
+E.cryptoDrift = function(S){
+  var v = E.cfg(S,"cryptoDrift_"+E.cryptoStage(S));
+  return isFinite(v) ? v : 0;
+};
+/* 每輪擲一次是否換狀態；要換的時候在另外兩態之間再擲一次。
+   刻意與景氣完全脫鉤——這正是這一節要教的事：幣圈的多空與實體經濟沒有必然關係。 */
+E.tickCryptoCycle = function(S){
+  if(!E.cryptoOn(S)) return;
+  var pr = E.cfg(S,"cryptoCycleSwitchProb"); if(!isFinite(pr)) pr = 0.15;
+  if(util.rand(S) >= pr) return;
+  var cur = E.cryptoStage(S);
+  var others = E.CRYPTO_STAGES.filter(function(x){ return x!==cur; });
+  var nx = others[Math.min(others.length-1, Math.floor(util.rand(S)*others.length))];
+  if(nx===cur) return;
+  S.cryptoCycle = nx;
+  E.ev("CRYPTO_CYCLE_CHANGED",{ from:cur, to:nx,
+    fromText:E.CRYPTO_STAGE_TEXT[cur], toText:E.CRYPTO_STAGE_TEXT[nx] });
+};
+/* 逐輪報價：與 M1 完全同一套四層模型，只是多疊一層幣圈漂移。
+   刻意複製而不是把 M1 那段抽成共用函式——M1 那段是鐵律 4 的比對基準，一個字都不能動。 */
+E.tickCryptoPrice = function(S){
+  var defs = E.cryptoDefs(S); if(!defs.length) return;
+  var mult = S.config.stockVolatilityMult*(S.config.volatilityLevel===1?0:1);
+  var drift = S.config["drift_"+S.macro.stage];
+  var cyc = E.cryptoDrift(S);
+  defs.forEach(function(def){
+    if(S.delisted && S.delisted[def.symbol]) return;      // 已歸零：不再報價、不再消耗亂數
+    var pr = S.stockPrices[def.symbol];
+    if(!isFinite(pr)) return;
+    var chg = drift*E.stockMacroBeta(S,def) + (def.driftBonus||0) + cyc
+            + E.stockVol(S,def)*mult*util.gauss(S);
+    chg = E.capMove(S,def,chg);
+    S.stockPrices[def.symbol] = E.clampPrice(S,def,pr*(1+chg));
+    if(!S.stockHistory) S.stockHistory={};
+    var h = (S.stockHistory[def.symbol] || (S.stockHistory[def.symbol]=[def.face]));
+    h.push(S.stockPrices[def.symbol]); if(h.length>12) h.shift();
+  });
+};
+
+/* ---- 託管：交易所 vs 冷錢包 ---- */
+E.cryptoCustody = function(S, p){ return (p && p.flags && p.flags.cryptoCold) ? "cold" : "exchange"; };
+E.cryptoCustodyText = function(S, p){
+  return E.cryptoCustody(S,p)==="cold" ? "冷錢包（自己保管）" : "交易所（平台保管）";
+};
+E.cryptoHoldings = function(p, sym){
+  return (p.assets||[]).filter(function(a){ return a.kind==="STOCK" && a.symbol===sym; });
+};
+/* 交易所倒閉：放在交易所的幣直接歸零，冷錢包免疫。
+   直接把資產打成 0 並記一筆分錄——帳一定要平，不能只改 marketValue。 */
+E.cryptoExchangeFail = function(S, label){
+  var defs = E.cryptoDefs(S); if(!defs.length) return 0;
+  var hit = 0;
+  defs.forEach(function(def){
+    S.players.forEach(function(p){
+      if(p.bankrupt) return;
+      if(E.cryptoCustody(S,p)==="cold") return;           // 冷錢包免疫——這就是那筆錢在買的東西
+      var lost = 0;
+      E.cryptoHoldings(p, def.symbol).forEach(function(a){
+        var mv = util.r2(a.marketValue||0);
+        if(mv<=0) return;
+        lost = util.r2(lost + mv);
+        ledger.post(S, p, "交易所倒閉："+E.stockName(S,def.symbol)+" 資產歸零",
+          [{account:"ASSET", delta:-mv, refId:a.instanceId, label:def.name+" 歸零"}],
+          {eduTags:["crypto","custody","loss"], detail:{symbol:def.symbol, units:a.units, lost:mv}});
+        a.marketValue = 0; a.units = 0;
+        a.flags = a.flags||{}; a.flags.wiped = true;
+      });
+      p.assets = p.assets.filter(function(a){ return !(a.flags && a.flags.wiped); });
+      if(lost>0){
+        hit++;
+        p.stats.cryptoWiped = util.r2((p.stats.cryptoWiped||0) + lost);
+        E.ev("CRYPTO_EXCHANGE_LOSS",{ playerId:p.id, symbol:def.symbol, amount:lost, label:label||"" });
+        /* 與期貨同一條紀律：這裡跑在事件結算，當前玩家不一定是他 →【排隊】不推卡 */
+        E.queueFutNotice(p, { title:"🏦 交易所倒閉：幣不見了",
+          text:"你放在交易所的 "+E.stockName(S,def.symbol)+" 價值 "+util.money(lost)+" 全數歸零。"+
+               "「Not your keys, not your coins」——放在平台上的幣，帳上是平台的負債，不是你的資產。"+
+               "人生商城的〈硬體冷錢包〉可以免疫這件事。" });
+        if(p.cash<0) E.enterBankruptcy(S,p);
+      }
+    });
+  });
+  return hit;
 };
 
 /* ---------------------- 玩家間資產轉讓（含 AI 議價） ---------------------- */
@@ -2558,11 +3137,11 @@ E.npcAcceptReferral = function(S, tgt, card, fee){
 // 原本只算 payload.cost，導致產險顯示「免費」，而且 mallAffordable 也跟著繞過檢查。
 E.mallCost = function(S, it, p){
   var pl=(it&&it.payload)||{};
-  var profSalary = (ns.content.professionById && ns.content.professionById[p.professionId]) ? ns.content.professionById[p.professionId].salary : 40;
-    var effectiveSal = (p.derived && p.derived.salaryIncome > 0) ? p.derived.salaryIncome : profSalary;
-    var base = (pl.costSalaryMult && p && p.derived)
-      ? util.r2(effectiveSal * pl.costSalaryMult)
-      : (pl.cost || 0);
+  // S21c：依月薪計價（安太座）。S22：沒有薪水（自由圈／失業）就回退到固定 cost——
+  // 原版回退用 65，比全部職業的月薪都高，等於沒薪水的人反而付最貴。
+  var base = (pl.costSalaryMult && p && p.derived && p.derived.salaryIncome > 0)
+    ? util.r2(p.derived.salaryIncome * pl.costSalaryMult)
+    : (pl.cost || 0);
   return util.r2(base + (pl.annualPremium||0));
 };
 /* ===================== S7b：木作與居家修繕 =====================
@@ -2685,6 +3264,12 @@ E.mallApply = function(S, p, it){
     p.flags[pl.flag+"Item"]     = it.id;       // 到期時要問「要不要續約這一項」
     p.flags[pl.flag+"Asked"]    = 0;
     p.flags[pl.flag+"FeeEnded"] = 0;           // 這一期的月費還在扣
+  }
+  // S23c：永久旗標（不會到期、不用續約）——目前用在硬體冷錢包
+  if(pl.permaFlag && !p.flags[pl.permaFlag]){
+    p.flags[pl.permaFlag] = true;
+    if(pl.permaNote) notes.push(pl.permaNote);
+    E.ev("PERMA_FLAG_SET",{playerId:p.id, flag:pl.permaFlag, itemId:it.id, title:it.title});
   }
   // 人脈：海外留學／EMBA 解鎖特殊機會牌堆
   if(pl.network && !p.flags.network){
@@ -2907,11 +3492,68 @@ E.summarizeClaims = function(list, playerId){
   return out;
 };
 
-// V11：夢想的第 n 點對應到一個具體成就（由 dreamMilestoneData 派生）
-E.dreamMilestone = function(S,p,n){
-  var item=E.dreamMilestoneData(S,p,n);
-  return item ? item.title : "";
+/* ===================== S24：夢想里程碑（抽選、圖片、相容） =====================
+   V11 起「夢想的第 n 點」對應一個具體成就（爬玉山、帛琉潛水⋯⋯），原本是寫死的
+   「第 n 點 → milestones[n-1]」，所以同一個夢想每一局跑的路線一模一樣，玩久了會膩。
+
+   S24 改成：每個夢想備一池里程碑（目標 20 條），開局**抽 dreamCost 條**當本局的路線。
+   ⚠️ 相容鐵律：池子只有剛好 dreamCost 條（＝現行的 8×5 資料）時，**原序照用且完全
+   不取用亂數**——否則所有既有局的牌序都會偏掉，「開關全關要能重現基線」當場就斷。 */
+
+// 里程碑可以是字串（舊）或 {t, img}（新）——兩種並存，資料可以分批換。
+E.msText = function(m){ return (m && typeof m==="object") ? (m.t||m.text||"") : (m||""); };
+E.msImg  = function(m){ return (m && typeof m==="object") ? (m.img||null) : null; };
+
+/* 開局為每個夢想抽出本局的路線，存進 S.dreamRoutes[dreamId]＝里程碑索引陣列。
+   存索引而不是存內容：存檔小、重放穩，日後換掉某一條的文案也不會讓舊存檔對不上位置。 */
+E.rollDreamRoutes = function(S){
+  var need = S.config.dreamCost || 5;
+  S.dreamRoutes = {};
+  /* 開關（鐵律 2）：關掉＝取池子的前 need 條、完全不取用亂數，行為與 S23 之前一字不差。
+     必須有這個開關——池子從 5 條變 20 條之後，抽選會消耗亂數，
+     「開關全關要能逐位元重現基線」的比對就得靠它才做得下去。 */
+  var poolOn = E.cfg(S,"dreamRoutePool");
+  if(poolOn===undefined) poolOn = 1;
+  (ns.content.dreams||[]).forEach(function(dr){
+    var pool = dr.milestones||[];
+    if(!poolOn || pool.length <= need){
+      // 開關關掉、或池子不夠抽 → 取前 need 條原序照用，且【不取用亂數】（相容鐵律）
+      S.dreamRoutes[dr.id] = pool.slice(0, need).map(function(_,i){ return i; });
+      return;
+    }
+    /* 最後一條釘住＝本局的收尾。池子的第 20 條多半就是那個「完成」的節點
+       （干卓萬山收官、登陸南極半島、學校營運到收支平衡、基金會不靠創辦人也能運作），
+       不釘的話「集滿 5 點」那一刻可能講的是中途某一段，情緒收不起來。 */
+    var pinFinale = E.cfg(S,"dreamRoutePinFinale");
+    if(pinFinale===undefined) pinFinale = 1;
+    var last = pool.length-1;
+    var idx = pool.map(function(_,i){ return i; });
+    var picked = pinFinale && need>=2
+      ? util.shuffle(S, idx.slice(0,last)).slice(0, need-1).concat([last])
+      : util.shuffle(S, idx).slice(0, need);
+    /* 抽完再依原順序排：里程碑本身有敘事順序（第一顆星 → 圓滿二十顆），
+       打亂順序會讓「第 5 點」講出比「第 1 點」更早的事。抽的是【哪五條】，不是順序。 */
+    S.dreamRoutes[dr.id] = picked.sort(function(a,b){ return a-b; });
+  });
 };
+// 本局這個夢想的第 n 條里程碑（原始物件，可能是字串或 {t,img}）
+E.dreamMilestoneRaw = function(S,p,n){
+  var dr=ns.content.byId[p.dreamCardId];
+  if(!dr || !dr.milestones || !dr.milestones.length) return null;
+  var route = (S.dreamRoutes && S.dreamRoutes[dr.id]) || null;
+  if(route && route.length){
+    var k = Math.max(1, Math.min(route.length, n)) - 1;
+    return dr.milestones[route[k]] || null;
+  }
+  // 沒有抽過（舊存檔、或內容缺失）→ 退回 V11 的寫死對應，畫面不會空掉
+  var i=Math.max(1,Math.min(dr.milestones.length,n))-1;
+  return dr.milestones[i]||null;
+};
+// 相容入口：既有呼叫端拿到的仍然是純文字
+E.dreamMilestone = function(S,p,n){ return E.msText(E.dreamMilestoneRaw(S,p,n)); };
+/* 這一點的圖檔名（相對於 assets/dreams/）。沒有就回 null——
+   介面拿到 null 就走純文字，與 S23 之前完全一樣。 */
+E.dreamMilestoneImg = function(S,p,n){ return E.msImg(E.dreamMilestoneRaw(S,p,n)); };
 
 /* v0.2 §1：購點（每回合限 1 點、價格 base×n、限現金） */
 E.buyDreamProgress = function(S,p){
@@ -2922,8 +3564,8 @@ E.buyDreamProgress = function(S,p){
   ledger.post(S,p,"投入圓夢：買下一段進度",[{account:"CASH",delta:-price,label:"圓夢支出"}],{eduTags:["dream"]});
   var mItemPaid = E.dreamMilestoneData(S, p, p.dreamProgress);
   E.ev("DREAM_PROGRESS",{playerId:p.id, progress:p.dreamProgress, paid:true,
-    milestone: mItemPaid ? mItemPaid.title : E.dreamMilestone(S,p,p.dreamProgress),
-    imageFile: mItemPaid ? mItemPaid.imageFile : null,
+    milestone:E.dreamMilestone(S,p,p.dreamProgress),
+    milestoneImg:E.dreamMilestoneImg(S,p,p.dreamProgress),         // S24：全服公告要配圖
     dreamName:(ns.content.byId[p.dreamCardId]||{}).name||""});
   E.checkDreamWin(S,p);
   return true;
@@ -2977,7 +3619,7 @@ E.autoInvestOn = function(S){
 };
 
 // 用一筆預算去買某檔股票，回傳實際買了幾張與花掉多少（買不起就買 0 張）
-E.autoBuyUnits = function(S, p, sym, budget, why){
+E.autoBuyUnits = function(S, p, sym, budget, why, opts){
   var def=ns.content.stockBySymbol[sym]; if(!def) return {units:0, spent:0};
   if(S.delisted && S.delisted[sym]) return {units:0, spent:0, dead:true};
   var price=E.stockPrice(S,def);
@@ -2990,7 +3632,7 @@ E.autoBuyUnits = function(S, p, sym, budget, why){
   if(units<1) return {units:0, spent:0};
   var total=util.r2(price*units);
   var feeA=E.stockFee(S,total);
-  var div=util.r2(units*def.face*def.dividendYieldMonthly);
+  var div=util.r2(units*E.stockDivPerUnit(S,def));        // S23a：同上
   var ex=p.assets.filter(function(x){ return x.kind==="STOCK"&&x.symbol===sym&&!(x.flags&&x.flags.margin); })[0];
   var aid = ex ? ex.instanceId : util.uid(S,"A");
   if(ex){ ex.units+=units; ex.costBasis=util.r2(ex.costBasis+total);
@@ -3003,7 +3645,17 @@ E.autoBuyUnits = function(S, p, sym, budget, why){
             {account:"ASSET",delta:total,refId:aid,label:E.stockName(S,sym)}];
   if(feeA) post.push({account:"CASH",delta:-feeA,label:"券商手續費"});
   if(div) post.push({account:"INCOME_PASSIVE",delta:div,refId:aid,label:E.stockName(S,sym)+" 股息"});
-  ledger.post(S,p,why+"："+E.stockName(S,sym)+" ×"+units,post,{eduTags:["equity","auto-invest"]});
+  /* S23a：摘要要說清楚錢從哪來。原本只寫「股息再投入：〇〇 ×164」，
+     玩家看到現金又被扣一次會以為重複扣款——把本期股息與手續費寫進摘要。 */
+  // 累積張數：這一檔現在總共抱了幾張（含這次買的；融資倉另計，不混在一起）
+  var heldNow = util.sum(p.assets.filter(function(a){
+    return a.kind==="STOCK" && a.symbol===sym && !(a.flags&&a.flags.margin) && !(a.flags&&a.flags.wallpaper); }),
+    function(a){ return a.units||0; });
+  var sumTxt = why+"："+E.stockName(S,sym)+" ×"+units+"（累積 "+heldNow+" 張）";
+  if(opts && opts.dividend>0)
+    sumTxt = why+"：本期股息 "+util.money(opts.dividend)+" → 買 "+E.stockName(S,sym)+" "+units+" 張（累積 "+heldNow+" 張）";
+  ledger.post(S,p,sumTxt,post,{eduTags:["equity","auto-invest"],
+    detail:{ units:units, price:price, fee:feeA, dividend:(opts&&opts.dividend)||0, held:heldNow }});
   // spent 含手續費——carry（還沒湊滿一張的預算）要從實際花掉的金額算起
   return {units:units, spent:util.r2(total+feeA), price:price, fee:feeA};
 };
@@ -3043,7 +3695,7 @@ E.tickAutoInvest = function(S, p){
     p.divCarry=p.divCarry||{};
     var budget=util.r2((p.divCarry[sym]||0) + div);
     if(p.cash < budget){ p.divCarry[sym]=0; return; }
-    var r2=E.autoBuyUnits(S,p,sym,budget,"股息再投入");
+    var r2=E.autoBuyUnits(S,p,sym,budget,"股息再投入",{dividend:div});
     p.divCarry[sym]=util.r2(budget - r2.spent);
     if(r2.units>0) E.ev("DIV_REINVESTED",{playerId:p.id, symbol:sym, units:r2.units,
                                           spent:r2.spent, dividend:div});
@@ -3206,9 +3858,14 @@ E.beginTurn = function(S){
     if((S.decisionQueue||[]).some(function(d){ return d.kind==="BANKRUPTCY"; })){ E.syncPhase(S); return; }
   }
   E.tickRenewals(S,p);               // 產險自動續約、健檢／健身年約到期詢問
-  E.tickDelistWarn(S,p);
-  E.tickDirectorship(S,p);           // 獨立董事車馬費、審計警訊與弊案結算
-  E.tickScamInvestments(S,p);        // 偽裝高息投資延遲引爆處理             // S7b：下市警示在自己的回合才跳卡
+  E.tickDelistWarn(S,p);             // S7b：下市警示在自己的回合才跳卡
+  E.tickFutCall(S,p);                // S23b：期貨追繳（在自己的回合才跳卡）
+  E.tickDirectorship(S,p);           // S21/S22：獨立董事車馬費、審計警訊與弊案結算
+  E.tickScamInvestments(S,p);        // S21/S22：偽裝高息投資到期引爆
+  // S22：上面兩個結算可能把人打到現金負——電腦玩家走 npcRescue 失敗就地破產、真人則排入破產決策。
+  // 與 S14b 發薪那段同一個洞：破產已成定局卻停在 ROLL，誰都推不動。這裡照同一套收尾。
+  if(p.bankrupt){ S.turnResolved=true; return E.endTurn(S); }
+  if((S.decisionQueue||[]).some(function(d){ return d.kind==="BANKRUPTCY"; })){ E.syncPhase(S); return; }
   E.ev("TURN_START",{playerId:p.id, turn:S.turnNumber});
 };
 
@@ -3269,6 +3926,12 @@ E.onRoundEnd = function(S){
       if(pl2){ var a=pl2.assets.filter(function(x){return x.instanceId===e.assetId;})[0];
         if(a){ a.monthlyIncome=util.r2(a.monthlyIncome+e.amount);
           ledger.post(S,pl2,"事件結束："+e.label,[{account:"INCOME_PASSIVE",delta:e.amount,refId:a.instanceId,label:e.label}],{eduTags:["event-end"]}); } } }
+    if(e.kind==="DELAYED_FX"){ var plX=S.players[e.playerId];      // S22：定時炸彈到期
+      if(plX && !plX.bankrupt){
+        E.applyEffects(S,plX,e.effects,e.label);
+        E.ev("DELAYED_EFFECT_FIRED",{playerId:plX.id, label:e.label});
+        if(plX.cash<0) E.enterBankruptcy(S,plX);
+      } }
     if(e.kind==="DIV_BONUS") delete S.dividendBonus[e.symbol];
     if(e.kind==="SPACE_MULT") delete S.spaceMult[e.spaceType];
     if(e.kind==="PARAM"){ E.ev("EVENT_EXPIRED",{label:e.label, param:e.param}); }
@@ -3521,94 +4184,117 @@ E.finishByRanking = function(S, reason){
   E.ev("GAME_OVER",{reason:reason||"MAX_TURNS", playerId:S.winner});
 };
 
-/* ==================== 獨立董監事與偽裝投資機制 ==================== */
+/* ==================== S21/S22：獨立董監事與偽裝投資機制 ====================
+   單位提醒：全遊戲金額以「千元」計（月薪 30–42）。S21 原版把車馬費寫成 8000–25000、
+   賠償 40000–200000，是把千元當成元；S22 全部換回遊戲量級。
+   公司表放在引擎，介面與 NPC 都從這裡讀，數字只維護一份。 */
+E.DIRECTOR_COMPANIES = {
+  A: { title:"大型績優權值股", income:8,  term:6, hasInsurance:true,  crashMin:0, crashMax:0, fineAmount:0,
+       risk:"低", note:"治理健全、有 D&O 責任險；車馬費最少，但任期六輪可以安穩領完。" },
+  B: { title:"成長型科技新創板", income:15, term:6, hasInsurance:true,  crashMin:3, crashMax:8, fineAmount:120,
+       risk:"中", note:"有 D&O 責任險（承擔八成）；成長故事漂亮，但帳有沒有做過，任期內未必看得出來。" },
+  C: { title:"爭議家族小型股", income:25, term:6, hasInsurance:false, crashMin:2, crashMax:5, fineAmount:200,
+       risk:"高", note:"沒有責任險；車馬費最高，關係人交易也最多——弊案幾乎是時間問題。" }
+};
+// 能在爆雷前看出假帳的技能（S21 用 SKL_BOOK／SKL_CPA_AUDIT；法律線只擋賠償，看不出帳）
+E.directorAuditSkill = function(p){ return E.hasSkill(p,"SKL_CPA_AUDIT") || E.hasSkill(p,"SKL_BOOK"); };
+E.directorLegalShield = function(p){ return E.hasSkill(p,"SKL_GOV_LEGAL"); };
+
 E.tickDirectorship = function(S, p){
   if(!p.directorship || p.bankrupt) return;
   var d = p.directorship;
+  var crashSoon = d.crashTurn!==null && d.crashTurn!==undefined && !d.resigned;
 
-  // 1) 未請辭每輪發放車馬費
-  if(!d.resigned){
-    d.termTurnsLeft = (d.termTurnsLeft || 6) - 1;
-    ledger.post(S, p, "獨立董事車馬費：" + d.title,
-      [{ account: "CASH", delta: d.monthlyIncome, label: "車馬費收入" }], { eduTags: ["directorship", "cashflow"] });
+  // 1) 弊案引爆（先於車馬費：爆雷那一輪沒有錢領）
+  if(crashSoon && S.turnNumber >= d.crashTurn && d.termTurnsLeft > 0){
+    var fine = d.fineAmount||0;
+    var shield = E.directorLegalShield(p);
+    var own = shield ? 0 : (d.hasInsurance ? util.r2(fine*0.2) : fine);
+    var why = shield ? "（合規治理專業：舉證已盡善良管理人注意義務，免除連帶賠償）"
+            : d.hasInsurance ? "（D&O 責任險承擔八成）" : "（無責任險，全額自負）";
+    var imp = E.captureImpact(S,p,function(){
+      if(own>0) ledger.post(S,p,"獨立董事連帶賠償："+d.title+why,
+        [{ account:"CASH", delta:-own, label:"弊案連帶民事賠償" }], { eduTags:["directorship","liability"] });
+    });
+    var skip = shield ? 1 : (d.hasInsurance ? 1 : 2);
+    p.skippedTurns = (p.skippedTurns||0) + skip; p.skipReason = "應訴假帳掏空訴訟";
+    p.stats.skillJoy = (p.stats.skillJoy||0) - (own>0 ? (d.hasInsurance ? 2 : 5) : 1);
+    p.stats.directorCrashed = (p.stats.directorCrashed||0) + 1;
+    E.ev("DIRECTOR_CRASH", { playerId:p.id, company:d.title, fine:own, insured:d.hasInsurance, shield:shield, skip:skip });
+    E.pushDecision(S,p,{ kind:"ACK", title:"💥 弊案爆發："+d.title,
+      text:"檢調搜索公司，董事會全員列為被告。"+why+" 你將停走 "+skip+" 輪應訴。", impact:imp });
+    p.directorship = null;
+    if(p.cash<0) E.enterBankruptcy(S,p);
+    return;
   }
 
-  // 2) 爆雷前 1 輪審計預警（具備財會審計技能者可識破）
-  if(!d.resigned && S.turnNumber === d.crashTurn - 1 && !d.warned){
-    var hasAudit = E.hasSkill && (E.hasSkill(p, "SKL_BOOK") || E.hasSkill(p, "SKL_CPA_AUDIT"));
-    if(hasAudit){
-      d.warned = true;
-      S.decisionQueue.push({
-        decisionId: util.uid(S, "D"),
-        kind: "RESIGN_DIRECTORSHIP",
-        playerId: p.id,
-        title: "⚠️ 審計警訊：假帳弊案即將爆發！",
-        company: d.title,
-        text: "你在查核本季財務報告時，發現異常關係人鉅額借貸且憑證不全，" + d.title + " 即將爆發弊案！你是否要立即跳船請辭？",
-        options: [
-          { optionId: "resign", label: "💡 立即請辭獨立董事（及時停損，免除民事連帶賠償）" },
-          { optionId: "stay", label: "⚠️ 抱持僥倖，繼續留任領取本期車馬費" }
-        ]
-      });
-      E.ev("DIRECTOR_AUDIT_WARNING", { playerId: p.id, company: d.title });
-    }
-  }
-
-  // 3) 弊案引爆結算輪次
-  if(S.turnNumber >= d.crashTurn){
-    if(d.resigned){
-      E.ev("DIRECTOR_CRASH_AVOIDED", { playerId: p.id, company: d.title });
-      p.directorship = null;
-    } else {
-      var fine = d.fineAmount || 120;
-      var actualFine = d.hasInsurance ? util.r2(fine * 0.2) : fine;
-      ledger.post(S, p, "獨立董事連帶賠償：" + d.title + (d.hasInsurance ? "（D&O 責任險承擔 80%）" : "（無責任險，全額自負）"),
-        [{ account: "CASH", delta: -actualFine, label: "弊案連帶民事賠償" }], { eduTags: ["directorship", "liability"] });
-      if(E.addJoy) E.addJoy(p, d.hasInsurance ? -2 : -5);
-      p.skippedTurns = (p.skippedTurns || 0) + (d.hasInsurance ? 1 : 2);
-      p.skipReason = "應訴假帳掏空訴訟";
-      E.ev("DIRECTOR_CRASH", { playerId: p.id, company: d.title, fine: actualFine, insured: d.hasInsurance });
+  // 2) 已請辭：等到原本會爆的那一輪，揭曉「你躲過了」
+  if(d.resigned){
+    if(d.crashTurn===null || S.turnNumber >= d.crashTurn){
+      E.ev("DIRECTOR_CRASH_AVOIDED", { playerId:p.id, company:d.title });
+      E.pushDecision(S,p,{ kind:"ACK", title:"🚢 你跳船了："+d.title+" 弊案爆發",
+        text:"前董事會成員全數遭起訴，只有及時辭任、留下查核紀錄的你全身而退。" });
       p.directorship = null;
     }
     return;
   }
 
-  // 4) 任期滿順利卸任
-  if(!d.resigned && d.termTurnsLeft <= 0){
-    if(E.addJoy) E.addJoy(p, 2);
-    if(p.virtues) p.virtues.JUSTICE = Math.min(S.config.virtueMaxLevel || 5, (p.virtues.JUSTICE || 0) + 1);
-    ledger.post(S, p, "獨立董事任期圓滿卸任",
-      [{ account: "CASH", delta: 0, label: "聲譽積累" }], { eduTags: ["directorship"] });
-    E.ev("DIRECTOR_TERM_COMPLETE", { playerId: p.id, company: d.title });
+  // 3) 車馬費（每輪一次）
+  d.termTurnsLeft -= 1;
+  ledger.post(S,p,"獨立董事車馬費："+d.title,
+    [{ account:"CASH", delta:d.monthlyIncome, label:"車馬費收入" }], { eduTags:["directorship","cashflow"] });
+
+  // 4) 爆雷前一輪的審計預警——只有看得懂帳的人收得到
+  if(crashSoon && S.turnNumber === d.crashTurn-1 && !d.warned && d.termTurnsLeft > 0){
+    if(E.directorAuditSkill(p)){
+      d.warned = true;
+      E.pushDecision(S,p,{ kind:"RESIGN_DIRECTORSHIP", company:d.title,
+        title:"⚠️ 審計警訊："+d.title+" 的帳不對",
+        text:"你在查核本季財務報告時，發現異常關係人鉅額借貸且憑證不全——假帳弊案就在眼前。是否立即請辭？" });
+      E.ev("DIRECTOR_AUDIT_WARNING", { playerId:p.id, company:d.title });
+    }
+  }
+
+  // 5) 任期屆滿順利卸任
+  if(d.termTurnsLeft <= 0){
+    var mx = S.config.virtueMaxLevel||3;
+    p.virtues = p.virtues||{};
+    if((p.virtues.PRUDENCE||0) < mx){ p.virtues.PRUDENCE=(p.virtues.PRUDENCE||0)+1;
+      E.ev("VIRTUE_UP",{playerId:p.id, axis:"PRUDENCE", level:p.virtues.PRUDENCE}); }
+    p.stats.skillJoy = (p.stats.skillJoy||0) + 2;
+    p.stats.directorCompleted = (p.stats.directorCompleted||0) + 1;
+    E.ev("DIRECTOR_TERM_COMPLETE", { playerId:p.id, company:d.title });
+    E.pushDecision(S,p,{ kind:"ACK", title:"🎓 獨立董事任期圓滿："+d.title,
+      text:"六輪任期平安落幕，聲譽與人脈都留下了（謹慎修養 +1、幸福感 +2）。" });
     p.directorship = null;
   }
 };
 
+/* 偽裝成事業的吸金盤：買進時已照一般事業入帳（配息走 INCOME_PASSIVE），
+   到期那一輪在自己的回合開始整筆歸零——用 sellAsset(mult 0) 走正規出售路徑，
+   資產分錄與 marketValue 才對得起來（鐵律三），連帶的信貸也照規矩留下。 */
 E.tickScamInvestments = function(S, p){
   if(!p.scamInvestments || !p.scamInvestments.length || p.bankrupt) return;
-  p.scamInvestments = p.scamInvestments.filter(function(inv){
-    if(S.turnNumber < inv.crashTurn){
-      if(inv.monthlyDividend > 0){
-        ledger.post(S, p, "高息專案固定分紅：" + inv.title,
-          [{ account: "CASH", delta: inv.monthlyDividend, label: "分紅入帳" }], { eduTags: ["scam-dividend"] });
-      }
-      return true;
-    }
-    var assetIdx = (p.assets || []).findIndex(function(a){ return a.instanceId === inv.instanceId || a.cardId === inv.cardId; });
-    if(assetIdx >= 0){
-      var badAsset = p.assets[assetIdx];
-      ledger.post(S, p, "吸金資產價值歸零：" + badAsset.name,
-        [{ account: "ASSET", delta: -badAsset.marketValue, refId: badAsset.instanceId, label: "本金血本無歸" },
-         { account: "INCOME_PASSIVE", delta: -badAsset.monthlyIncome, refId: badAsset.instanceId, label: "非法分紅終止" }],
-        { eduTags: ["scam-crash"] });
-      p.assets.splice(assetIdx, 1);
-    }
-    ledger.post(S, p, "專案資金鏈斷裂爆雷：" + inv.title + "（負責人潛逃）",
-      [{ account: "CASH", delta: -Math.min(p.cash, 10), label: "追討訴訟費" }], { eduTags: ["scam-crash"] });
-    if(E.addJoy) E.addJoy(p, -3);
-    E.ev("SCAM_INVESTMENT_CRASH", { playerId: p.id, title: inv.title });
-    return false;
+  var keep=[];
+  p.scamInvestments.forEach(function(inv){
+    if(S.turnNumber < inv.crashTurn){ keep.push(inv); return; }
+    var a = p.assets.filter(function(x){ return x.instanceId===inv.instanceId; })[0];
+    if(!a) return;                                    // 已經自己賣掉了——逃過一劫
+    var card = ns.content.byId[inv.cardId], pl = (card&&card.payload)||{};
+    var fee = Math.min(p.cash, pl.scamLegalFee!==undefined ? pl.scamLegalFee : 5);
+    var imp = E.captureImpact(S,p,function(){
+      E.sellAsset(S,p,a,0,{ summary:"資金鏈斷裂："+inv.title+" 歸零（負責人潛逃）",
+        evName:"SCAM_INVESTMENT_CRASH", eduTags:["scam","exit"] });
+      if(fee>0) ledger.post(S,p,"追討訴訟費："+inv.title,
+        [{ account:"CASH", delta:-fee, label:"集體訴訟與律師費" }], { eduTags:["scam"] });
+    });
+    p.stats.skillJoy = (p.stats.skillJoy||0) - 3;
+    p.stats.scamCrashed = (p.stats.scamCrashed||0) + 1;
+    E.pushDecision(S,p,{ kind:"ACK", cardId:inv.cardId,
+      title:"💥 爆雷："+inv.title, text:"檢調查出是後金補前金的資金盤，負責人已出境。你的本金整筆歸零。", impact:imp });
+    if(p.cash<0) E.enterBankruptcy(S,p);
   });
+  p.scamInvestments = keep;
 };
 
 })(ns);

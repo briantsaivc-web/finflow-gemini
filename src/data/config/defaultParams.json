@@ -2276,6 +2276,367 @@
       "label": "談判技能成交折讓",
       "desc": "具備談判技能時，買方在拍賣／轉讓的成交價折讓比例（賣方同額減收）",
       "hot": false
+    },
+    {
+      "key": "stockDivRestock",
+      "value": 1,
+      "min": 0,
+      "max": 1,
+      "step": 1,
+      "group": "股市",
+      "label": "股息每輪重算",
+      "desc": "1＝每輪依殖利率上限與景氣係數重算每張股息；0＝S22 行為（買進時依面額定死）",
+      "hot": true
+    },
+    {
+      "key": "stockYieldCapMonthly",
+      "value": 0.018,
+      "min": 0,
+      "max": 0.05,
+      "step": 0.001,
+      "group": "股市",
+      "label": "殖利率上限（月）",
+      "desc": "每張股息不得超過現價乘以這個比例。0.018＝年化 21.6%；0＝不設上限",
+      "hot": true
+    },
+    {
+      "key": "divMult_RECOVERY",
+      "value": 1,
+      "min": 0,
+      "max": 2,
+      "step": 0.05,
+      "group": "股市",
+      "label": "股息係數：復甦",
+      "desc": "",
+      "hot": true
+    },
+    {
+      "key": "divMult_BOOM",
+      "value": 1.1,
+      "min": 0,
+      "max": 2,
+      "step": 0.05,
+      "group": "股市",
+      "label": "股息係數：過熱",
+      "desc": "",
+      "hot": true
+    },
+    {
+      "key": "divMult_RECESSION",
+      "value": 0.8,
+      "min": 0,
+      "max": 2,
+      "step": 0.05,
+      "group": "股市",
+      "label": "股息係數：衰退",
+      "desc": "景氣差，公司賺得少，配息跟著砍",
+      "hot": true
+    },
+    {
+      "key": "divMult_DEPRESSION",
+      "value": 0.5,
+      "min": 0,
+      "max": 2,
+      "step": 0.05,
+      "group": "股市",
+      "label": "股息係數：蕭條",
+      "desc": "",
+      "hot": true
+    },
+    {
+      "key": "stockPerSymbolFloor",
+      "value": 1,
+      "min": 0,
+      "max": 1,
+      "step": 1,
+      "group": "股市",
+      "label": "個股自訂股價下限",
+      "desc": "1＝高股息股用自己的地板（面額 40%）；0＝全部共用全域下限",
+      "hot": true
+    },
+    {
+      "key": "delistMode",
+      "value": "hazard",
+      "options": [
+        "hazard",
+        "fixed"
+      ],
+      "group": "難度",
+      "label": "下市判定方式",
+      "desc": "hazard＝每輪擲一次倒閉機率（門檻每局暗抽）；fixed＝S22 的固定門檻＋緩衝後必倒",
+      "hot": true
+    },
+    {
+      "key": "delistDdMin",
+      "value": 0.75,
+      "min": 0.5,
+      "max": 0.95,
+      "step": 0.05,
+      "group": "難度",
+      "label": "危險區跌幅門檻（下限）",
+      "desc": "每局在上下限之間暗抽一個門檻，玩家算不出確切數字",
+      "hot": false
+    },
+    {
+      "key": "delistDdMax",
+      "value": 0.9,
+      "min": 0.5,
+      "max": 0.99,
+      "step": 0.01,
+      "group": "難度",
+      "label": "危險區跌幅門檻（上限）",
+      "desc": "",
+      "hot": false
+    },
+    {
+      "key": "delistHazardRecession",
+      "value": 0.08,
+      "min": 0,
+      "max": 0.5,
+      "step": 0.01,
+      "group": "難度",
+      "label": "倒閉機率：衰退",
+      "desc": "進入危險區後，衰退期每輪的基礎倒閉機率",
+      "hot": true
+    },
+    {
+      "key": "delistHazardDepression",
+      "value": 0.25,
+      "min": 0,
+      "max": 0.8,
+      "step": 0.01,
+      "group": "難度",
+      "label": "倒閉機率：蕭條",
+      "desc": "跌破九成再加倍",
+      "hot": true
+    },
+    {
+      "key": "delistHazardPerTurn",
+      "value": 0.03,
+      "min": 0,
+      "max": 0.2,
+      "step": 0.01,
+      "group": "難度",
+      "label": "危險區每多撐一輪的加成",
+      "desc": "撐越久越危險",
+      "hot": false
+    },
+    {
+      "key": "advancedMarketsEnabled",
+      "value": 1,
+      "min": 0,
+      "max": 1,
+      "step": 1,
+      "group": "進階金融",
+      "label": "M9 進階金融總開關",
+      "desc": "0＝即使勾選 M9 也不開放期貨與虛擬貨幣",
+      "hot": true
+    },
+    {
+      "key": "advUnlockHoldTurns",
+      "value": 12,
+      "min": 0,
+      "max": 40,
+      "step": 1,
+      "group": "進階金融",
+      "label": "解鎖：累計持股輪數",
+      "desc": "任一檔股票累計持有滿這麼多輪就解鎖（或改學〈衍生性商品與槓桿〉）",
+      "hot": true
+    },
+    {
+      "key": "futMarginPct",
+      "value": 0.1,
+      "min": 0.02,
+      "max": 0.5,
+      "step": 0.01,
+      "group": "進階金融",
+      "label": "期貨原始保證金比例",
+      "desc": "一口要付合約值的幾成",
+      "hot": true
+    },
+    {
+      "key": "futMaintPct",
+      "value": 0.05,
+      "min": 0.01,
+      "max": 0.4,
+      "step": 0.01,
+      "group": "進階金融",
+      "label": "期貨維持保證金比例",
+      "desc": "保證金餘額低於合約值的這個比例就追繳",
+      "hot": true
+    },
+    {
+      "key": "futMaintPctSkilled",
+      "value": 0.04,
+      "min": 0.01,
+      "max": 0.4,
+      "step": 0.01,
+      "group": "進階金融",
+      "label": "期貨維持保證金（有衍生性商品技能）",
+      "desc": "學過的人追繳線較寬",
+      "hot": true
+    },
+    {
+      "key": "futFeePerLot",
+      "value": 0.3,
+      "min": 0,
+      "max": 5,
+      "step": 0.1,
+      "group": "進階金融",
+      "label": "期貨手續費（每口定額）",
+      "desc": "開倉與平倉各收一次",
+      "hot": true
+    },
+    {
+      "key": "futMaxLots_A",
+      "value": 10,
+      "min": 0,
+      "max": 20,
+      "step": 1,
+      "group": "進階金融",
+      "label": "期貨口數上限：信用 A",
+      "desc": "",
+      "hot": true
+    },
+    {
+      "key": "futMaxLots_B",
+      "value": 6,
+      "min": 0,
+      "max": 20,
+      "step": 1,
+      "group": "進階金融",
+      "label": "期貨口數上限：信用 B",
+      "desc": "",
+      "hot": true
+    },
+    {
+      "key": "futMaxLots_C",
+      "value": 3,
+      "min": 0,
+      "max": 20,
+      "step": 1,
+      "group": "進階金融",
+      "label": "期貨口數上限：信用 C",
+      "desc": "",
+      "hot": true
+    },
+    {
+      "key": "npcUsesM9",
+      "value": 0,
+      "min": 0,
+      "max": 1,
+      "step": 1,
+      "group": "進階金融",
+      "label": "電腦玩家是否碰進階金融",
+      "desc": "0＝不碰（平衡指紋乾淨）；S23c 再評估開放",
+      "hot": true
+    },
+    {
+      "key": "futBasisMax",
+      "value": 0.01,
+      "min": 0,
+      "max": 0.05,
+      "step": 0.005,
+      "group": "進階金融",
+      "label": "期貨折溢價上限",
+      "desc": "期貨報價相對現貨的基差，每輪在 ±這個範圍內重抽（0.01＝±1%）",
+      "hot": true
+    },
+    {
+      "key": "futAutoTopUp",
+      "value": 1,
+      "min": 0,
+      "max": 1,
+      "step": 1,
+      "group": "進階金融",
+      "label": "保證金見底時自動補繳",
+      "desc": "1＝現金補得起就自動補（避免直接強平）；0＝直接強制平倉",
+      "hot": true
+    },
+    {
+      "key": "dreamRoutePool",
+      "value": 1,
+      "min": 0,
+      "max": 1,
+      "step": 1,
+      "group": "夢想",
+      "label": "每局從里程碑池抽路線",
+      "desc": "1＝開局從每個夢想的 20 條里程碑抽 5 條當本局路線；0＝固定用前 5 條（S23 以前的行為，且不取用亂數）",
+      "hot": false
+    },
+    {
+      "key": "dreamRoutePinFinale",
+      "value": 1,
+      "min": 0,
+      "max": 1,
+      "step": 1,
+      "group": "夢想",
+      "label": "最後一點釘住池子的收尾",
+      "desc": "1＝本局路線的最後一條固定用池子的最後一條（那多半就是「完成」的節點）；0＝完全隨機抽",
+      "hot": false
+    },
+    {
+      "key": "dreamImageBase",
+      "value": "assets/dreams/",
+      "group": "夢想",
+      "label": "夢想里程碑圖片資料夾",
+      "desc": "里程碑配圖的相對路徑。換圖＝用同檔名覆蓋該資料夾裡的檔案；圖載不到會自動退回純文字，單檔離線遊玩不受影響",
+      "hot": false
+    },
+    {
+      "key": "cryptoOn",
+      "value": 1,
+      "min": 0,
+      "max": 1,
+      "step": 1,
+      "group": "進階金融",
+      "label": "迷因幣（M9）",
+      "desc": "0＝這一局不提供虛擬貨幣（M9 只剩期貨）",
+      "hot": false
+    },
+    {
+      "key": "cryptoCycleSwitchProb",
+      "value": 0.15,
+      "min": 0,
+      "max": 0.5,
+      "step": 0.05,
+      "group": "進階金融",
+      "label": "幣圈循環轉換機率",
+      "desc": "每輪有多少機率換一個幣圈狀態（狂熱／盤整／寒冬）",
+      "hot": true
+    },
+    {
+      "key": "cryptoDrift_MANIA",
+      "value": 0.08,
+      "min": -0.3,
+      "max": 0.3,
+      "step": 0.01,
+      "group": "進階金融",
+      "label": "幣圈漂移：狂熱",
+      "desc": "狂熱期每輪疊加在四層股價模型上的漂移",
+      "hot": true
+    },
+    {
+      "key": "cryptoDrift_RANGE",
+      "value": 0,
+      "min": -0.3,
+      "max": 0.3,
+      "step": 0.01,
+      "group": "進階金融",
+      "label": "幣圈漂移：盤整",
+      "desc": "盤整期每輪疊加的漂移",
+      "hot": true
+    },
+    {
+      "key": "cryptoDrift_WINTER",
+      "value": -0.1,
+      "min": -0.3,
+      "max": 0.3,
+      "step": 0.01,
+      "group": "進階金融",
+      "label": "幣圈漂移：寒冬",
+      "desc": "寒冬期每輪疊加的漂移",
+      "hot": true
     }
   ]
 }

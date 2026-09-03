@@ -9,8 +9,13 @@ ns.loadContent = function(readJson){
   ["m1","m2","m3","m4","m6","outer","v10","mall","skill","special"].forEach(function(m){ var j=readJson("content-mod-"+m); if(j) packs.push(j); });
   var C = { cards:{}, professions:base.professions, boardLayout:base.boardLayout,
             boardLayoutOuter:base.boardLayoutOuter, stockDefs:base.stockDefs,
+            futuresDefs:base.futuresDefs||[],                      // S23b：M9 期貨合約定義
+            /* S23c：迷因幣。刻意【不】併進 stockDefs——那份陣列被開盤價、M1 逐輪報價、
+               下市判定等一大堆迴圈直接走訪，多一檔就多消耗亂數，「開關全關要能重現基線」
+               （鐵律 4）當場就斷。改成獨立陣列，只有 M9 開啟時才由 E.cryptoDefs 併進來。 */
+            cryptoDefs:base.cryptoDefs||[],
             personalities:base.personalities, strings:base.strings, byId:{},
-            professionById:{}, stockBySymbol:{}, personalityById:{}, errors:[] };
+            professionById:{}, stockBySymbol:{}, futBySymbol:{}, personalityById:{}, errors:[] };
   packs.forEach(function(pk){ Object.keys(pk.cards||{}).forEach(function(deck){
     C.cards[deck] = (C.cards[deck]||[]).concat(pk.cards[deck]); }); });
   Object.keys(C.cards).forEach(function(d){ C.cards[d].forEach(function(c){
@@ -19,6 +24,9 @@ ns.loadContent = function(readJson){
   (base.cards.DREAM||[]).forEach(function(d){ C.byId[d.id]=d; });
   C.professions.forEach(function(p){ C.professionById[p.id]=p; C.byId[p.id]=p; });
   C.stockDefs.forEach(function(s){ C.stockBySymbol[s.symbol]=s; });
+  C.futuresDefs.forEach(function(f){ C.futBySymbol[f.symbol]=f; C.byId[f.symbol]=f; });
+  /* 索引可以全域建（查得到不代表玩得到）——能不能交易由 E.stockTradable 一個入口把關。 */
+  C.cryptoDefs.forEach(function(c){ C.stockBySymbol[c.symbol]=c; C.byId[c.symbol]=c; });
   C.personalities.forEach(function(x){ C.personalityById[x.id]=x; });
   C.dreams = base.cards.DREAM||[];
   var req = { professions:["id","name","salary","baseExpenses","startingCash"] };
@@ -44,7 +52,7 @@ ns.buildConfig = function(reg){
 };
 
 /* =============================== 模組系統 =============================== */
-var M = ns.modules = { registry:{}, order:["M1","M2","M3","M4","M6","M8"] };
+var M = ns.modules = { registry:{}, order:["M1","M2","M3","M4","M6","M8","M9"] };
 M.active = function(S){ return M.order.filter(function(m){ return S.enabledModules.indexOf(m)>=0 && M.registry[m]; })
                         .map(function(m){ return M.registry[m]; }); };
 function fanout(name){ return function(S,a,b,c){
@@ -86,6 +94,7 @@ M.registry.M1 = {
       h.push(S.stockPrices[def.symbol]); if(h.length>12) h.shift();
     });
     E.revalueStocks(S);
+    E.restockDividends(S);  // S23a：價格更新後重算每張股息（殖利率上限＋景氣係數）
     E.tickDelist(S);        // S7b：價格更新後才判斷下市（警示→緩衝→歸零）
     // V10：帳上獲利達門檻 → 提示玩家停利或續抱（每個部位只提示一次）
     var gp=E.cfg(S,"stockGainAlertPct");
@@ -357,8 +366,13 @@ M.registry.M4 = {
     E.ev("MACRO_TRANSITION",{from:from,to:to});
     M.onMacroTransition(S,from,to);
     if(util.rand(S) < S.config.policyEventProb){
-      var card=E.drawCard(S,"MACRO_EVENT",function(c){ return !c.stages || c.stages.indexOf(to)>=0; });
+      // S23a：台灣真實案例事件（博達、太電、解盲、雙卡）一局各只來一次——
+      // 同一局連炸兩次同一件事既不真實，也會把股市打到與平衡設計無關的地方。
+      var card=E.drawCard(S,"MACRO_EVENT",function(c){
+        if(c.oncePerGame && S.macroDone && S.macroDone[c.id]) return false;
+        return !c.stages || c.stages.indexOf(to)>=0; });
       if(card){
+        if(card.oncePerGame){ S.macroDone=S.macroDone||{}; S.macroDone[card.id]=1; }
         // S13.1 NEW-02：總體事件依定義就是全體事件。內容若漏標 target，
         // applyEffects 會退化成 targets=[p]（＝players[0]），變成只有一號座位吃到景氣紅利。
         // 這裡把玩家級的 op 強制視為 all；不改動原始卡物件（避免污染 ns.content.byId）。
@@ -500,6 +514,7 @@ E.digitalOn = function(S){
 // 開始經營：扣建置成本、每月維護費進支出水位、佔用「經營中」的時間槽
 // S9：有沒有那門手藝，決定「爬多久」與「紅得起來的機率」，但不決定「能不能做」
 E.digitalPro = function(S, p, card){
+  if(E.hasSkill(p, "SKL_AI_ARCH")) return true;   // S22：AI 系統架構——任何數位資產都算「有手藝」
   return !!(card && card.requires && E.hasSkill(p, card.requires));
 };
 // 回傳這張卡對這個玩家的實際參數（UI 的對照表與引擎共用同一份計算，才不會對不上）
@@ -682,6 +697,38 @@ M.registry.M8 = {
   }
 };
 
+/* --------- M9 進階金融（S23b：期貨；S23c 再加虛擬貨幣） ---------
+   獨立成模組而不是掛在 M1 底下，是因為後面還要放匯率、債券這些同一層的東西；
+   而且教學局與新手／標準難度要能整包關掉，鐵律 4 的基線比對才守得住。      */
+M.registry.M9 = {
+  /* S23c：迷因幣的開盤價、名稱、歷史與幣圈起始狀態都在這裡建。
+     刻意不放進 E.newGame 的開盤價迴圈——那個迴圈每檔消耗一次亂數，
+     多一檔就會把所有非 M9 局的亂數序列整個推移（鐵律 4 當場斷）。 */
+  onGameSetup:function(S){
+    var defs = E.cryptoDefs(S); if(!defs.length) return;
+    S.cryptoCycle = "RANGE";                       // 每局都從盤整開始（不抽，省一次亂數）
+    var spread = E.cfg(S,"stockOpenSpread"); if(!isFinite(spread)||spread<0) spread=0;
+    defs.forEach(function(d){
+      var px = d.face;
+      if(spread>0) px = E.clampPrice(S, d, d.face*(1 + (util.rand(S)*2-1)*spread));
+      S.stockPrices[d.symbol] = px;
+      S.stockHistory[d.symbol] = [px];
+      S.stockNames[d.symbol] = d.name;             // 幣不換名：名字本身就是它的迷因
+    });
+  },
+  onRoundEnd:function(S){
+    E.tickHoldTurns(S);        // 解鎖進度：任一檔股票累計持有幾輪
+    E.tickFutures(S);          // 期貨逐輪結算（在 M1 更新完股價之後——M9 排在 order 最後）
+    // S23c：幣圈循環 → 幣價 → 重評價 → 歸零判定，順序與 M1 對股票做的完全一致
+    E.tickCryptoCycle(S);
+    E.tickCryptoPrice(S);
+    if(E.cryptoDefs(S).length){
+      E.revalueStocks(S);
+      E.tickDelist(S, E.cryptoDefs(S));
+    }
+  }
+};
+
 /* ================================ NPC =================================== */
 var npc = ns.npc = {};
 
@@ -740,9 +787,11 @@ npc._rawNextAction = function(S){
   return null;
 };
 
-npc.nextAction = function(S){
-  return npc._rawNextAction(S);
-};
+/* S22：S21 原版在這裡把每個動作先 E.apply(…,{mutate:false}) 乾跑一次，等於每一步都
+   structuredClone 整個局面——模擬器從 58ms/局 變成 3,465ms/局（慢 60 倍），1000 局閘門要跑一小時。
+   死結的真正修法是 npc.canBuyMall 那組前置檢查（上面），加上介面層 mpSend 被拒時自動補 END_TURN；
+   拿掉乾跑後 300 局 0 死結、每局回合數與乾跑版完全一致。 */
+npc.nextAction = npc._rawNextAction;
 
 // V11：幸福感是獲勝條件之一 —— NPC 在夢想接近完成、但幸福感不足時，
 // 會去商城買「人情品格」類（便宜、確定性效果，不含擲骰與薪資機率），與人類玩家同一套規則。
@@ -1002,10 +1051,12 @@ npc.decide = function(S,p,d){
   var A=function(opt,params){ return { type:"DECIDE", playerId:p.id,
     payload:{ decisionId:d.decisionId, optionId:opt, params:params||{} } }; };
   switch(d.kind){
+    // S21/S22：獨立董事——收到審計警訊一律跳船（決定論基準行為）；
+    // 邀請則看性格：保守派接 A（穩領六輪）、槓桿派接 B、創投派敢接 C。
     case "RESIGN_DIRECTORSHIP": return A("resign");
     case "APPOINT_DIRECTOR": {
-      if(w.cashReserveFloor >= 4) return A("pass");
-      return A("appoint", { company: (w.capitalGainAppetite >= 0.7 ? "B" : "A") });
+      var ap=w.capitalGainAppetite||0;
+      return A("appoint", { company: ap>=1 ? "C" : (ap>=0.5 ? "B" : "A") });
     }
     case "ACK": case "TRIAL_RESULT": case "BLESSING": case "SKILL_RESULT": return A("ok");   // 盲盒自動開盒
 
@@ -1058,7 +1109,18 @@ npc.decide = function(S,p,d){
     case "BUY": return npc.scoreBuy(S,p,d,w,A);
     // S7b：下市警示——電腦玩家一律停損（決定論）。
     // 這不是最佳解，而是「看到警示就處理」的基準行為，讓真人有得比較。
-    case "DELIST_WARN": return A("sell");
+    /* S7b／S23a：下市警示——電腦玩家的基準行為。
+       固定模式（必倒）一律停損；機率模式看風險等級：中以上一律賣，
+       低風險只有保守派會賣（其餘性格願意賭它撐過去）。這不是最佳解，
+       而是讓真人有得比較的一條基準線。 */
+    /* S23b：電腦玩家不主動碰進階金融（Brian 定案：先不碰，指紋最乾淨）。
+       但萬一有部位（例如未來開放後的存檔），追繳一律當場平倉——不賭。 */
+    case "FUT_MARGIN_CALL": return A("close");
+    case "DELIST_WARN": {
+      var lvlW = d.level;
+      if(!lvlW) return A("sell");
+      if(lvlW==="低" && (w.cashReserveFloor||3) < 4) return A("keep");
+      return A("sell"); }
 
     // 數位資產：付得起、且時間槽空著就做——這是把時間換成長尾的唯一途徑
     case "START_DIGITAL": {
@@ -1139,6 +1201,12 @@ npc.decide = function(S,p,d){
 npc.scoreBuy = function(S,p,d,w,A){
   var c=ns.content.byId[d.cardId], D=p.derived, floor=w.cashReserveFloor*D.totalExpenses;
   var best={score:-1e9, opt:"skip", params:{}};
+  // S22：吸金盤——看得懂帳或懂法、天性保守（cashReserveFloor ≥ 4）、或已經被騙過一次的電腦玩家直接拒絕；
+  // 其他人照報酬率評分（會上當，這正是要教的）
+  if(c && c.payload && c.payload.isScam
+     && ((w.cashReserveFloor||0)>=4 || (p.stats.scamCrashed||0)>0
+         || E.hasSkill(p,"SKL_BOOK")||E.hasSkill(p,"SKL_CPA_AUDIT")||E.hasSkill(p,"SKL_LAW")||E.hasSkill(p,"SKL_GOV_LEGAL")))
+    return A("skip");
   function consider(opt, cost, cfDelta, ltv, gain, params){
     if(cost>p.cash) return;
     var s=0;
@@ -1163,7 +1231,7 @@ npc.scoreBuy = function(S,p,d,w,A){
   } else if(c.kind==="STOCK"){
     var def=ns.content.stockBySymbol[c.payload.symbol], price=S.stockPrices[def.symbol]||c.payload.offerPrice;
     var units=Math.max(1, Math.floor(Math.min(p.cash*0.35, 900)/price));
-    if(units>=1) consider("cash", util.r2(price*units), util.r2(price*units*def.dividendYieldMonthly),
+    if(units>=1) consider("cash", util.r2(price*units), util.r2(units*E.stockDivPerUnit(S,def)),   // S23a：與引擎同一個入口
       0, E.stockVol(S,def)*30*w.capitalGainAppetite, {units:units});   // S15b：電腦玩家的評分也走同一個入口
   } else if(c.kind==="BUSINESS"){
     consider("cash", c.payload.price, util.r2(c.payload.monthlyProfit*E.incomeMultFor(S,"BUSINESS")), 0, 0.2);

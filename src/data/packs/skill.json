@@ -299,7 +299,7 @@
         "title": "AI 系統架構與應用",
         "flavor": "將繁瑣工作自動化，打造自己的數位分身與長尾資產。",
         "eduNote": "掌握技術架構的人，在科技變革期能把外在變動轉化為持續性被動收入。",
-        "hint": "功能：在科技裁員與產業變革事件中免疫技能衰退，提升數位資產產出。",
+        "hint": "功能：任何數位資產都以專業身分經營（門檻低、爆紅機率高）；科技類技能在產業變革事件中不會過時。",
         "cost": 50,
         "recurringMonthly": 0,
         "turns": 5,
@@ -308,6 +308,23 @@
         "decayable": false,
         "requiresSkill": "SKL_CODE",
         "moduleReq": "M8"
+      },
+      {
+        "id": "SKL_DERIV",
+        "deck": "SKILL",
+        "kind": "SKILL",
+        "title": "衍生性商品與槓桿",
+        "flavor": "看得懂保證金、維持率與逐日結算——先看得懂，才有資格下場。",
+        "eduNote": "槓桿放大的不只是報酬，還有你判斷錯誤時的速度。看不懂結算規則就下場，等於把命交給運氣。",
+        "hint": "功能：解鎖進階金融（期貨與虛擬貨幣）；期貨追繳線放寬（1.3 → 1.2）。",
+        "cost": 45,
+        "recurringMonthly": 0,
+        "turns": 4,
+        "tier": "HIGH",
+        "family": "FINANCE",
+        "decayable": false,
+        "requiresSkill": "SKL_BOOK",
+        "moduleReq": "M9"
       }
     ],
     "LIFE_EVENT": [
